@@ -1978,6 +1978,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
           improvePending={viewImgImproving}
           improveReady={viewImgImprovementReady}
           busy={ds.busy}
+          faceThresholds={d.face_thresholds}
           kleinAvailable={Boolean(caps.engines?.klein)}
           subjectType={d.subject_type || 'human'}
           onCrop={viewImgLive._rescueReviewPreview

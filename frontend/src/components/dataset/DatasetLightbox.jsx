@@ -9,6 +9,7 @@
  * decision and its stability guarantees.
  */
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import CompareSlider from './CompareSlider';
 import KleinImproveNote from './KleinImproveNote';
 import { lightboxImproveButtons } from '../../utils/improveEngines';
 import { useCapabilities } from '../../context/CapabilitiesContext';
@@ -19,36 +20,7 @@ import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { displayLabel } from '../../utils/labels';
 import PexelsAttribution from './PexelsAttribution';
 
-const COMPARE_HELP = 'Show the original this image was made from, next to it, at the same scale.';
-
-/**
- * One half of the comparison. The two panes are cells of the SAME grid, so they
- * get identical boxes; `object-contain` then renders both images at the same
- * scale and the same framing whatever their pixel size — the improve pass
- * rescales to a megapixel budget and keeps the aspect ratio, so this is the only
- * reading where "it looks better" means something. Each side is named in text,
- * never by colour alone.
- */
-function ComparePane({ label, url, alt, accent }) {
-  return (
-    <figure className="m-0 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-white/15">
-      <figcaption className={`shrink-0 border-b border-white/10 bg-black/70 px-2 py-1 text-[11px] font-semibold ${
-        accent ? 'text-indigo-200' : 'text-white/80'}`}>
-        {label}
-      </figcaption>
-      <div className="min-h-0 flex-1 p-1">
-        {/* h-full w-full, NOT max-h/max-w: an <img> left at its intrinsic size
-            is capped by max-* but never scaled UP, so a 0.4 MP original
-            rendered small next to a 2 MP result that filled its pane — the two
-            were shown at different scales, which is precisely the comparison
-            this mode must not produce. Filling the box and letting
-            object-contain letterbox makes both fit the SAME box. */}
-        <img src={url} alt={`${label} — ${alt}`}
-          className="h-full w-full select-none object-contain" />
-      </div>
-    </figure>
-  );
-}
+const COMPARE_HELP = 'Overlay the original this image was made from and drag the divider to compare, at the same scale.';
 
 export default function DatasetLightbox({
   img,
@@ -66,6 +38,7 @@ export default function DatasetLightbox({
   improvePending = false,
   improveReady = false,
   subjectType = '',
+  faceThresholds = null,
 }) {
   const { caps } = useCapabilities();
   const [full, setFull] = useState(false); // false = fit screen, true = 100 %
@@ -206,16 +179,12 @@ export default function DatasetLightbox({
         className="absolute top-3 right-3 z-10 w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white text-lg leading-none">✕</button>
 
       {inCompare ? (
-        /* Side by side once there is room for it (≥640 px), stacked below —
-           two 190 px-wide thumbnails on a phone would prove nothing, and a
-           stacked pair keeps each image at full width where width is the scarce
-           axis. Equal grid cells on both layouts = equal display scale. */
-        <div onClick={(e) => e.stopPropagation()}
-          className="flex-1 min-h-0 grid grid-rows-2 grid-cols-1 sm:grid-rows-1 sm:grid-cols-2 gap-2 p-2 sm:p-4">
-          <ComparePane label={compare.beforeLabel} alt={alt}
-            url={fileUrl(compare.parent.filename, parentNonce)} />
-          <ComparePane label={compare.afterLabel} alt={alt} url={url} accent />
-        </div>
+        /* One frame for both images at every width — a phone gets the same
+           reading as a desktop, which two stacked 190 px panes never gave. */
+        <CompareSlider alt={alt}
+          before={fileUrl(compare.parent.filename, parentNonce)} after={url}
+          beforeLabel={compare.beforeLabel} afterLabel={compare.afterLabel}
+          beforeImg={compare.parent} afterImg={img} faceThresholds={faceThresholds} />
       ) : full ? (
         <div className="flex-1 min-h-0 min-w-0 overflow-auto">
           <img src={url} alt={alt} onLoad={onImageLoad}
@@ -257,7 +226,7 @@ export default function DatasetLightbox({
               /* Zoom is OFF here, and says so. At 100 % a 2 MP result and a 0.5 MP
                  original cover different parts of the subject, which is exactly
                  the dishonest comparison this mode exists to avoid. */
-              ? 'same scale — exit comparison to zoom to 100 %'
+              ? 'same scale — drag the divider; exit comparison to zoom to 100 %'
               : full ? '100 % — click image to fit' : 'fitted — click image for 100 %'}
           </span>
         </div>
@@ -265,8 +234,8 @@ export default function DatasetLightbox({
           <button type="button" aria-pressed={comparing}
             onClick={(e) => { e.stopPropagation(); setFull(false); setComparing((v) => !v); }}
             aria-label={comparing
-              ? `Hide the original next to ${alt}`
-              : `Show the original next to ${alt}`}
+              ? `Hide the original overlay on ${alt}`
+              : `Overlay the original on ${alt} to compare`}
             title={COMPARE_HELP}
             className="min-h-9 w-full sm:w-auto px-3 py-1.5 rounded-lg border border-indigo-400/50 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 text-xs font-semibold">
             {comparing ? '⊟ Exit comparison' : '⧉ Compare with original'}

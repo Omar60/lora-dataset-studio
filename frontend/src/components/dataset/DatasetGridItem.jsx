@@ -2,6 +2,7 @@
 import { improvementBadge } from './improveCandidates.js';
 import { useEffect, useRef, useState } from 'react';
 import { displayLabel } from '../../utils/labels';
+import { faceBadge } from '../../utils/faceBadge';
 import { isSmallImageRescueRow } from '../../utils/smallImageRescue';
 import CaptionEditorDialog from './CaptionEditorDialog';
 import PromptEditPopover from './PromptEditPopover';
@@ -30,30 +31,6 @@ const STATUS_CLS = {
   pending: 'border-amber-400/40',
   failed: 'border-red-600',
 };
-
-// Seuils calibres antelopev2 (test3) — face_score brut persiste -> ajustables dans
-// Settings (face_scoring.green/orange) ; ces valeurs ne servent que de repli.
-const DEFAULT_FACE_VALID = 0.50, DEFAULT_FACE_ORANGE = 0.45;
-const GREY_LABEL = { no_face: 'no face detected', low_det: 'low detection',
-  too_small: 'face too small', extreme_pose: 'profile — not scored',
-  unreadable: 'unreadable', error: 'error' };
-
-// Retourne {border, icon, cls, label} d'apres face_state/face_score, ou null si pas analysé.
-// La bordure encode la largeur ET le style (plein=jugé / pointillé=non-jugeable) pour
-// ne PAS dépendre de la couleur seule (WCAG 1.4.1).
-function faceBadge(img, thresholds) {
-  if (img.face_state == null) return null;
-  if (img.face_state !== 'scorable' || img.face_score == null) {
-    return { border: 'border-2 border-dashed border-gray-500', icon: '👁', cls: 'text-gray-300',
-      label: GREY_LABEL[img.face_state] || 'not scored' };
-  }
-  const green = thresholds?.green ?? DEFAULT_FACE_VALID;
-  const orange = thresholds?.orange ?? DEFAULT_FACE_ORANGE;
-  const s = img.face_score;
-  if (s >= green) return { border: 'border-2 border-green-500', icon: '✓', cls: 'text-green-300', label: s.toFixed(2) };
-  if (s >= orange) return { border: 'border-2 border-amber-500', icon: '~', cls: 'text-amber-300', label: `${s.toFixed(2)} to review` };
-  return { border: 'border-4 border-red-500', icon: '⚠', cls: 'text-red-300', label: `${s.toFixed(2)} low` };
-}
 
 // Watermark V1 badge from watermark_state (🚩 detected / ⊘ dismissed / ✨ cleaned /
 // ⚠ failed), or null when never scanned ('none' is also silent — nothing to show).

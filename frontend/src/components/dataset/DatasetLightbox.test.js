@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { canRegenerateGeneric } from './improveRerun.js';
 
 const lightbox = readFileSync(new URL('./DatasetLightbox.jsx', import.meta.url), 'utf8');
+const slider = readFileSync(new URL('./CompareSlider.jsx', import.meta.url), 'utf8');
 const workspace = readFileSync(new URL('./DatasetWorkspace.jsx', import.meta.url), 'utf8');
 const hook = readFileSync(new URL('../../hooks/useDataset.js', import.meta.url), 'utf8');
 const grid = readFileSync(new URL('./DatasetGrid.jsx', import.meta.url), 'utf8');
@@ -32,25 +33,25 @@ test('lightbox exposes an accessible responsive image improvement action', () =>
 // The comparison is what makes an improvement judgeable: before this, the
 // lightbox showed the RESULT alone and the original had to be remembered.
 // node --test cannot render JSX, so the contract is asserted on the source.
-test('a derived image can be inspected next to the original it came from', () => {
-  // Both panes live in ONE grid whose cells are equal, and both images are
-  // object-contain: identical box, identical scale — the only honest way to
-  // compare an upscale against its source (Klein rescales to a pixel budget and
-  // keeps the aspect ratio, so equal boxes means identical framing).
-  assert.match(lightbox, /grid-rows-2 grid-cols-1 sm:grid-rows-1 sm:grid-cols-2/);
-  // h-full w-full, never max-h/max-w: an <img> at its intrinsic size is capped
-  // but never scaled UP, so a small original rendered smaller than the result
-  // that filled its pane — two different scales, the exact dishonesty this mode
-  // exists to remove. Caught in a headless capture, pinned here.
-  assert.match(lightbox, /className="h-full w-full select-none object-contain"/);
-  assert.doesNotMatch(lightbox, /max-h-full max-w-full select-none object-contain/);
+test('a derived image can be inspected against the original it came from', () => {
+  // The comparison is ONE frame with a draggable divider, not two panes: the
+  // difference an improve pass makes (skin texture, a softened jaw) survives the
+  // eye travelling between two boxes, and does not survive a wipe over the same
+  // pixels. The slider's own contract is asserted below.
+  assert.match(lightbox, /<CompareSlider alt=\{alt\}/);
+  assert.doesNotMatch(lightbox, /grid-rows-2 grid-cols-1 sm:grid-rows-1 sm:grid-cols-2/);
+  // Both rows travel, not just their URLs: the slider prints each side's face
+  // score, which is the number that decides whether an improvement is the same
+  // person — and the thresholds come from the dataset, like the grid's badges.
+  assert.match(lightbox, /beforeImg=\{compare\.parent\} afterImg=\{img\}/);
+  assert.match(lightbox, /faceThresholds=\{faceThresholds\}/);
   // Real button, pressed state carried by aria (not colour alone).
   assert.match(lightbox, /aria-pressed=\{comparing\}/);
   assert.match(lightbox, /Compare with original/);
   assert.match(lightbox, /Exit comparison/);
   // Full-width control at phone width, like the other lightbox actions.
   assert.match(lightbox, /w-full sm:w-auto[^]{0,400}Compare with original/);
-  // Each pane names its side in TEXT.
+  // Each side names itself in TEXT.
   assert.match(lightbox, /compare\.beforeLabel/);
   assert.match(lightbox, /compare\.afterLabel/);
   // Zoom is not silently broken: comparison says, in the same hint slot, that
@@ -59,6 +60,34 @@ test('a derived image can be inspected next to the original it came from', () =>
   // A vanished original explains itself instead of leaving a dead button.
   assert.match(lightbox, /compare && !compare\.available/);
   assert.match(lightbox, /\{compare\.reason\}/);
+});
+
+test('the compare slider wipes between two images pinned to the same box', () => {
+  // Same box + object-contain on BOTH images: Klein rescales to a pixel budget
+  // and keeps the aspect ratio, so identical boxes are what makes the two
+  // readings comparable. h-full w-full, never max-h/max-w — an <img> at its
+  // intrinsic size is capped but never scaled UP, which used to render a small
+  // original smaller than the result and compare two different scales.
+  const layers = slider.match(/className="absolute inset-0 h-full w-full select-none object-contain"/g);
+  assert.equal(layers?.length, 2);
+  assert.doesNotMatch(slider, /max-h-full max-w-full select-none object-contain/);
+  // clip-path, not width: the top image keeps its box, so the halves stay
+  // pixel-aligned at every divider position instead of reflowing as it moves.
+  assert.match(slider, /clipPath: `inset\(0 \$\{100 - pct\}% 0 0\)`/);
+  // The whole frame is the control (grab anywhere), and the drag survives the
+  // pointer leaving the box.
+  assert.match(slider, /role="slider"/);
+  assert.match(slider, /setPointerCapture\(e\.pointerId\)/);
+  assert.match(slider, /hasPointerCapture\(e\.pointerId\)/);
+  // Reachable without a pointer at all, and announced while it moves.
+  assert.match(slider, /tabIndex=\{0\}/);
+  assert.match(slider, /aria-valuenow=\{Math\.round\(pct\)\}/);
+  assert.match(slider, /KEY_STEP = \{ ArrowLeft: -2, ArrowRight: 2 \}/);
+  // The scores share the grid's single reading of face_state/face_score.
+  assert.match(slider, /from '\.\.\/\.\.\/utils\/faceBadge'/);
+  // A delta only when BOTH sides carry a real score — "-62 pts" against an
+  // unscored original would be a fabricated verdict.
+  assert.match(slider, /beforePercent === null \|\| afterPercent === null/);
 });
 
 test('workspace feeds the lightbox the resolved parent of a derived image', () => {

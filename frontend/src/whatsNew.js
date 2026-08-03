@@ -48,6 +48,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
 // Newest first. Prepend new waves at the top.
 export const WHATS_NEW = [
   {
+    id: '2026-08-03-compare-slider',
+    date: '2026-08-03',
+    title: 'Drag a divider over the original — and see what the improvement cost you',
+    blurb:
+      '⧉ Compare with original used to put the two images side by side, so judging an improvement meant looking left, looking right, and trusting your memory for the difference. The two now share one frame: drag the divider and the improved image wipes over the original under the same pixels, at the same scale. Each side carries its face-similarity score, and the improved side carries the delta — so a pass that added lovely skin texture while quietly moving the face reads as "▼ -13 pts" instead of looking like a win. Arrow keys move the divider too.',
+    to: '/datasets?section=images',
+  },
+  {
     id: '2026-08-03-review-opens-instantly',
     date: '2026-08-03',
     title: '▶ Review opens instantly, even on a 20 000-image bank',
