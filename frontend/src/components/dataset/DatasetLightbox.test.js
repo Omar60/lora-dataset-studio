@@ -90,6 +90,41 @@ test('the compare slider wipes between two images pinned to the same box', () =>
   assert.match(slider, /beforePercent === null \|\| afterPercent === null/);
 });
 
+test('an improvement can be judged, and left, without closing the comparison', () => {
+  // The verdict is reachable from the one view where it can honestly be made.
+  // Same toggle semantics as the grid's ✓/✕ — pressing the current state
+  // returns the image to undecided, in both places.
+  assert.match(lightbox, /onStatus\(img\.id, img\.status === 'keep' \? 'pending' : 'keep'\)/);
+  assert.match(lightbox, /onStatus\(img\.id, img\.status === 'reject' \? 'pending' : 'reject'\)/);
+  assert.match(lightbox, /aria-pressed=\{img\.status === 'keep'\}/);
+  // Navigation is offered ONLY while this image is itself queued for review; a
+  // "next" walking the whole grid would drop the comparison on the first plain
+  // photo it reached.
+  assert.match(lightbox, /\{onNavigate && queuePosition &&/);
+  assert.match(lightbox, /\{queuePosition\.index\} \/ \{queuePosition\.total\} to review/);
+  assert.match(lightbox, /disabled=\{queuePosition\.index <= 1\}/);
+  assert.match(lightbox, /disabled=\{queuePosition\.index >= queuePosition\.total\}/);
+  // Arrow keys walk the queue, EXCEPT while the divider holds focus — it is a
+  // slider, and stealing its keys would make the grabbed control inert.
+  assert.match(lightbox, /e\.target\?\.closest\?\.\('\[role="slider"\]'\)/);
+  assert.match(lightbox, /onNavigate\(e\.key === 'ArrowLeft' \? -1 : 1\)/);
+  // Walking the queue KEEPS the comparison open; it closes itself only where
+  // there is no original to compare against.
+  assert.match(lightbox, /useEffect\(\(\) => \{ if \(!canCompare\) setComparing\(false\); \}/);
+});
+
+test('workspace advances the review queue on a verdict and hides it elsewhere', () => {
+  assert.match(workspace, /const improveQueue = improvementReviewQueue\(gridImages\)/);
+  // The next image is resolved BEFORE the verdict: the decision is what removes
+  // this row from the queue, so afterwards it can no longer say what followed.
+  assert.match(workspace, /const next = advancing \? afterReviewDecision\(improveQueue, imageId\) : null/);
+  assert.match(workspace, /await ds\.setStatus\(imageId, status\)[\s\S]{0,80}if \(advancing\) setViewImg\(next\)/);
+  // Returning an image to 'pending' is not a verdict — it must not advance.
+  assert.match(workspace, /status !== 'pending' && !!reviewQueuePosition\(improveQueue, imageId\)/);
+  // The rescue review has its own flow and its own verdict UI.
+  assert.match(workspace, /onStatus=\{viewImgLive\._rescueReviewPreview \? undefined : decideViewImg\}/);
+});
+
 test('workspace feeds the lightbox the resolved parent of a derived image', () => {
   assert.match(workspace, /describeDerivedComparison/);
   assert.match(workspace, /compare=\{viewImgComparison\}/);

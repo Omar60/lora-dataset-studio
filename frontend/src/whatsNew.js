@@ -48,6 +48,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
 // Newest first. Prepend new waves at the top.
 export const WHATS_NEW = [
   {
+    id: '2026-08-03-review-improvements-in-place',
+    date: '2026-08-03',
+    title: 'Keep or reject an improvement without leaving the comparison',
+    blurb:
+      'Judging a batch of improvements meant a lap of the grid per image: open the candidate, compare, close, keep, hunt for the next one, open it, press compare again. The viewer now carries ✓ Keep and ✕ Reject, and walks the improvements still waiting for a verdict with ‹ › (or the arrow keys — the divider keeps them while you are holding it). Deciding moves straight to the next one with the comparison still open, and the viewer closes itself when the queue runs out. The counter says how many are left.',
+    to: '/datasets?section=images',
+  },
+  {
     id: '2026-08-03-compare-slider',
     date: '2026-08-03',
     title: 'Drag a divider over the original — and see what the improvement cost you',

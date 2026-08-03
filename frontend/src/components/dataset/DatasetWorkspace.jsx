@@ -52,6 +52,9 @@ import {
   isSmallImageRescueRow,
 } from '../../utils/smallImageRescue';
 import { describeDerivedComparison } from '../../utils/derivedCompare';
+import {
+  afterReviewDecision, improvementReviewQueue, reviewQueuePosition, stepReviewQueue,
+} from './improveReviewQueue';
 import { WORKSPACE_SECTIONS, SECTION_FOR_TARGET } from './workspaceSections';
 import { postJson, putJson } from '../../api/fetchClient';
 import { datasetToBankRequest, datasetToBankUrl } from './datasetToBank';
@@ -684,6 +687,27 @@ export default function DatasetWorkspace({ ds, onBack }) {
     && !viewImgLive._rescueReviewPreview
     && !isSmallImageRescueRow(viewImgLive)
     && viewImgLive.derivation_kind !== 'klein_image_improve';
+  /* Reviewing improvements without leaving the comparison. The queue is built
+     from gridImages, so ‹ › walk them in the order on SCREEN — active filters
+     and sort included — instead of a private order of their own. */
+  const improveQueue = improvementReviewQueue(gridImages);
+  const viewImgQueuePosition = viewImgLive && !viewImgLive._rescueReviewPreview
+    ? reviewQueuePosition(improveQueue, viewImgLive.id)
+    : null;
+  const navigateReview = (delta) => {
+    const target = stepReviewQueue(improveQueue, viewImgLive?.id, delta);
+    if (target) setViewImg(target);
+  };
+  const decideViewImg = async (imageId, status) => {
+    // WHERE TO GO NEXT is read before the verdict lands: the decision is what
+    // removes this row from the queue, so afterwards it can no longer say what
+    // followed it. A null target closes the viewer — the queue is empty, and
+    // holding the last judged image on screen would look like a failed click.
+    const advancing = status !== 'pending' && !!reviewQueuePosition(improveQueue, imageId);
+    const next = advancing ? afterReviewDecision(improveQueue, imageId) : null;
+    await ds.setStatus(imageId, status);
+    if (advancing) setViewImg(next);
+  };
 
   // Import to bank — the reverse of promoting bank images into a dataset. Both
   // choices retain Dataset-owned metadata; the default restores compatible
@@ -1979,6 +2003,9 @@ export default function DatasetWorkspace({ ds, onBack }) {
           improveReady={viewImgImprovementReady}
           busy={ds.busy}
           faceThresholds={d.face_thresholds}
+          onStatus={viewImgLive._rescueReviewPreview ? undefined : decideViewImg}
+          onNavigate={viewImgQueuePosition ? navigateReview : undefined}
+          queuePosition={viewImgQueuePosition}
           kleinAvailable={Boolean(caps.engines?.klein)}
           subjectType={d.subject_type || 'human'}
           onCrop={viewImgLive._rescueReviewPreview

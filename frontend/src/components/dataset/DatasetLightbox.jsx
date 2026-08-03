@@ -39,6 +39,9 @@ export default function DatasetLightbox({
   improveReady = false,
   subjectType = '',
   faceThresholds = null,
+  onStatus,
+  onNavigate,
+  queuePosition = null,
 }) {
   const { caps } = useCapabilities();
   const [full, setFull] = useState(false); // false = fit screen, true = 100 %
@@ -108,25 +111,37 @@ export default function DatasetLightbox({
   // Focus trap keeps Tab inside the dialog (P2-7).
   useFocusTrap(dialogRef, !!(img && img.filename));
 
-  // Keyboard support: Escape closes, initial focus on the close button.
+  // A comparison is only ever entered when the original is actually renderable;
+  // an unavailable one degrades to a stated reason, never a dead button.
+  const canCompare = !!(compare && compare.available && compare.parent?.filename);
+
+  // Keyboard support: Escape closes, ← → walk the review queue, initial focus on
+  // the close button.
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { onClose(); return; }
+      if (!onNavigate || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+      // The divider owns the arrows while it holds focus — it is a slider, and
+      // stealing its keys would make the one control you just grabbed inert.
+      if (e.target?.closest?.('[role="slider"]')) return;
+      e.preventDefault();
+      onNavigate(e.key === 'ArrowLeft' ? -1 : 1);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, onNavigate]);
   useEffect(() => { closeRef.current?.focus(); }, []);
-  // Moving to another image must not leave the previous comparison open on a
-  // parent that has nothing to do with it.
-  useEffect(() => { setComparing(false); }, [img?.id]);
+  /* Walking the review queue KEEPS the comparison open: leaving it between two
+     candidates is the manual step this queue exists to remove. It closes itself
+     only when the next image has no original to compare against, where staying
+     "in comparison" would be a mode with nothing in it. */
+  useEffect(() => { if (!canCompare) setComparing(false); }, [img?.id, canCompare]);
 
   if (!img || !img.filename) return null;
   const fileUrl = (filename, v) =>
     `/api/dataset/${datasetId}/img/${encodeURIComponent(filename)}${v ? `?v=${v}` : ''}`;
   const url = fileUrl(img.filename, nonce);
   const alt = displayLabel(img.variation_label) || 'dataset image';
-  // A comparison is only ever entered when the original is actually renderable;
-  // an unavailable one degrades to a stated reason, never a dead button.
-  const canCompare = !!(compare && compare.available && compare.parent?.filename);
   const inCompare = canCompare && comparing;
   const improvementActive = improving || improvePending;
   /* ONE button per engine that can run here, exactly like the selection
@@ -249,6 +264,62 @@ export default function DatasetLightbox({
             className="max-w-full break-words rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-100">
             <span aria-hidden>⚠ </span>{compare.reason}
           </span>
+        )}
+        {onStatus && (
+          /* The verdict lives HERE, next to the comparison, because this is
+             where it can be made: judging an improvement from the grid means
+             remembering what the original looked like. Same toggle semantics as
+             the grid's ✓/✕ (pressing the current state returns to undecided) —
+             two places, one behaviour. Deciding a queued improvement also moves
+             to the next one; that is the parent's business, not this button's. */
+          <div className={`flex items-stretch gap-2 ${rail ? 'w-full' : 'w-full sm:w-auto'}`}>
+            <button type="button" disabled={busy}
+              onClick={() => onStatus(img.id, img.status === 'keep' ? 'pending' : 'keep')}
+              aria-pressed={img.status === 'keep'} aria-label={`Keep ${alt}`}
+              title="Keep this version (press again to make it undecided)"
+              className={`min-h-9 flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45 ${
+                img.status === 'keep'
+                  ? 'bg-green-600 text-white'
+                  : 'bg-white/10 text-white hover:bg-white/20'}`}>
+              <span aria-hidden="true">✓</span> Keep
+            </button>
+            <button type="button" disabled={busy}
+              onClick={() => onStatus(img.id, img.status === 'reject' ? 'pending' : 'reject')}
+              aria-pressed={img.status === 'reject'} aria-label={`Reject ${alt}`}
+              title="Reject this version (press again to make it undecided)"
+              className={`min-h-9 flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45 ${
+                img.status === 'reject'
+                  ? 'bg-red-600 text-white'
+                  : 'bg-white/10 text-white hover:bg-white/20'}`}>
+              <span aria-hidden="true">✕</span> Reject
+            </button>
+          </div>
+        )}
+        {onNavigate && queuePosition && (
+          /* Only ever shown while this image IS one of the improvements waiting
+             for a verdict: a "next" that walked the whole grid would leave the
+             comparison behind on the first plain photo it hit. The count is the
+             honest part — it says how much of the queue is left. */
+          <div className={`flex items-stretch gap-2 ${rail ? 'w-full' : 'w-full sm:w-auto'}`}>
+            <button type="button" onClick={() => onNavigate(-1)}
+              disabled={queuePosition.index <= 1}
+              aria-label="Previous improvement to review"
+              title="Previous improvement to review (←)"
+              className="min-h-9 rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-45">
+              <span aria-hidden="true">‹</span>
+            </button>
+            <span className="flex flex-1 items-center justify-center px-1 text-[11px] text-white/60 tabular-nums"
+              title="Improvements still waiting for a verdict">
+              {queuePosition.index} / {queuePosition.total} to review
+            </span>
+            <button type="button" onClick={() => onNavigate(1)}
+              disabled={queuePosition.index >= queuePosition.total}
+              aria-label="Next improvement to review"
+              title="Next improvement to review (→)"
+              className="min-h-9 rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-45">
+              <span aria-hidden="true">›</span>
+            </button>
+          </div>
         )}
         {onCrop && (
           <button type="button" onClick={() => onCrop(img)}
