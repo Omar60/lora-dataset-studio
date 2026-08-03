@@ -114,7 +114,10 @@ test('an improvement can be judged, and left, without closing the comparison', (
 });
 
 test('workspace advances the review queue on a verdict and hides it elsewhere', () => {
-  assert.match(workspace, /const improveQueue = improvementReviewQueue\(gridImages\)/);
+  // Order and membership from the VISIBLE list, originals from the full one:
+  // the "improvements" status filter hides originals by design, and resolving
+  // them among the visible rows emptied the queue in that very view.
+  assert.match(workspace, /const improveQueue = improvementReviewQueue\(gridImages, images\)/);
   // The next image is resolved BEFORE the verdict: the decision is what removes
   // this row from the queue, so afterwards it can no longer say what followed.
   assert.match(workspace, /const next = advancing \? afterReviewDecision\(improveQueue, imageId\) : null/);

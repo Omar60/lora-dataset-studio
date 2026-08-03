@@ -687,10 +687,12 @@ export default function DatasetWorkspace({ ds, onBack }) {
     && !viewImgLive._rescueReviewPreview
     && !isSmallImageRescueRow(viewImgLive)
     && viewImgLive.derivation_kind !== 'klein_image_improve';
-  /* Reviewing improvements without leaving the comparison. The queue is built
-     from gridImages, so ‹ › walk them in the order on SCREEN — active filters
-     and sort included — instead of a private order of their own. */
-  const improveQueue = improvementReviewQueue(gridImages);
+  /* Reviewing improvements without leaving the comparison. Order and membership
+     come from gridImages, so ‹ › walk them in the order on SCREEN — active
+     filters and sort included. Originals are resolved against the FULL list:
+     the "improvements" status filter hides them by design, and looking them up
+     among the visible rows emptied the queue in the very view built for this. */
+  const improveQueue = improvementReviewQueue(gridImages, images);
   const viewImgQueuePosition = viewImgLive && !viewImgLive._rescueReviewPreview
     ? reviewQueuePosition(improveQueue, viewImgLive.id)
     : null;

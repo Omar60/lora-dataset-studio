@@ -28,10 +28,19 @@ export function isReviewable(image, byId) {
  * The reviewable candidates of `images`, IN THE ORDER GIVEN — callers pass the
  * grid's own list, so the queue walks the images in the order on screen rather
  * than in some private order of its own.
+ *
+ * `allImages` is where ORIGINALS are looked up, and it is deliberately a second
+ * list: the grid's status filter has an "improvements" mode that shows the
+ * candidates and hides everything else, so the parent of a visible candidate is
+ * routinely NOT visible itself. Resolving parents against the filtered list
+ * emptied the queue in exactly the view built for this review — every filter
+ * that hides originals (undecided, improvements, a tag filter) did the same.
+ * Membership and order come from what is on screen; existence does not.
  */
-export function improvementReviewQueue(images) {
+export function improvementReviewQueue(images, allImages = images) {
   const rows = Array.isArray(images) ? images.filter(Boolean) : [];
-  const byId = new Map(rows.map((image) => [image.id, image]));
+  const pool = Array.isArray(allImages) ? allImages.filter(Boolean) : rows;
+  const byId = new Map(pool.map((image) => [image.id, image]));
   return rows.filter((image) => isReviewable(image, byId));
 }
 

@@ -28,6 +28,18 @@ test('the queue keeps the order it was given — the grid decides it, not us', (
   assert.deepEqual(improvementReviewQueue(images).map((i) => i.id), [33, 11, 22]);
 });
 
+test('an original hidden by the grid filter still counts as comparable', () => {
+  // THE regression: the grid's "improvements" filter shows the candidates and
+  // hides everything else, so a visible candidate's original is not visible.
+  // Resolving parents against the filtered list emptied the queue in the exact
+  // view this review was built for — no ‹ ›, and no advance on a verdict.
+  const all = [parent(1), parent(2), candidate(11, 1), candidate(22, 2)];
+  const visible = [candidate(11, 1), candidate(22, 2)];   // filter: improvements
+  assert.deepEqual(improvementReviewQueue(visible, all).map((i) => i.id), [11, 22]);
+  // A parent that exists nowhere is still not comparable, filter or no filter.
+  assert.deepEqual(improvementReviewQueue(visible, [parent(1)]).map((i) => i.id), [11]);
+});
+
 test('a junk list is an empty queue, never a crash', () => {
   for (const junk of [null, undefined, 'nope', [null, undefined]]) {
     assert.deepEqual(improvementReviewQueue(junk), []);
