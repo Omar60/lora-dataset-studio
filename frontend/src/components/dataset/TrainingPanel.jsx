@@ -7,7 +7,9 @@ import { useCapabilities } from '../../context/CapabilitiesContext';
 import { postJson } from '../../hooks/useDataset';
 import { animeFamilyNote } from './animeFamilyNote.js';
 import { customBasePushView } from './customBasePush.js';
-import { dualCaptionsSupport } from './dualCaptions.js';
+import {
+  cacheTextEmbeddingsDefault, cacheTextEmbeddingsEffective, dualCaptionsSupport,
+} from './dualCaptions.js';
 import { maskedCarryOverAction, clearLegacyMasked } from './maskedMigration.js';
 import ConceptFaceMaskField from './ConceptFaceMaskField';
 import {
@@ -653,6 +655,14 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
   const advEma = adv?.ema ?? 0;
   const advEmaChoices = adv?.ema_choices ?? [0.99, 0.999];
   const advDualCaptions = Boolean(adv?.dual_captions);
+  /* Text-embedding cache. TRI-STATE on the wire (true / false / absent = the
+     family's own recipe), so what the checkbox shows is the EFFECTIVE value —
+     an unchecked box on Krea would claim the opposite of what runs. */
+  const advCacheTextEmbeddings = cacheTextEmbeddingsEffective(
+    adv?.cache_text_embeddings, trainType);
+  const advCacheIsFamilyDefault = cacheTextEmbeddingsDefault(trainType);
+  const advDualCaptionsSupport = dualCaptionsSupport(
+    trainType, { cacheTextEmbeddings: adv?.cache_text_embeddings });
   // Concept face masking (issue #15). `supported` is the SERVER's answer (concept
   // only) rather than a second `kind === 'concept'` in JSX that could drift from it.
   const advMaskFaces = Boolean(adv?.mask_faces);
@@ -2866,6 +2876,41 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                   not part of the Krea Raw LoKr likeness starter.
                 </span>
               </div>
+              {/* Text-embedding cache — encode every caption ONCE, before the run */}
+              <div className="flex flex-col gap-0.5">
+                <label className="flex items-center gap-2 flex-wrap cursor-pointer">
+                  <span className="text-content text-[0.75rem] w-28 shrink-0 inline-flex items-center gap-1">
+                    Cache captions<HelpBadge topic="training.cache_text_embeddings" />
+                  </span>
+                  <input type="checkbox" checked={advCacheTextEmbeddings}
+                    onChange={(e) => saveAdv({ cache_text_embeddings: e.target.checked })}
+                    aria-label="Cache text embeddings before training"
+                    className="h-4 w-4 rounded border-border bg-surface accent-indigo-500" />
+                  <span className="text-content-muted text-[0.75rem]">
+                    faster steps, less VRAM{advCacheIsFamilyDefault ? ' — on by default here' : ''}
+                  </span>
+                </label>
+                {/* The cost is the one thing a speed toggle must not hide. */}
+                {advCacheTextEmbeddings && advDualCaptions && (
+                  <span className="text-amber-400 text-[0.6875rem] leading-relaxed">
+                    Dual captions cannot run with this on — the run trains on the long caption alone.
+                  </span>
+                )}
+                {!advCacheTextEmbeddings && advCacheIsFamilyDefault && (
+                  <span className="text-amber-400 text-[0.6875rem] leading-relaxed">
+                    This family caches to fit its text encoder in VRAM — expect a slower run, and an
+                    out-of-memory one on a small card.
+                  </span>
+                )}
+                <span className="text-content-subtle text-[0.6875rem] leading-relaxed">
+                  <b className="text-content-muted font-medium">Why:</b> encodes every caption once before
+                  training instead of at every step, then frees the text encoder — fewer seconds per step and
+                  several GB back.
+                  <b className="text-content-muted font-medium"> How:</b> ai-toolkit stores exactly ONE embedding
+                  per image, so the captions are frozen at launch: re-captioning needs a new run, and Dual
+                  captions has nowhere to put its short wording.
+                </span>
+              </div>
               {/* Dual captions — train each image with a long AND a short caption */}
               <div className="flex flex-col gap-0.5">
                 <label className="flex items-center gap-2 flex-wrap cursor-pointer">
@@ -2881,9 +2926,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
                 {/* Issue #22 (1Tomber): Krea 2 / Anima cache their text embeddings, so the
                     short caption can never be encoded. Say it here rather than let the user
                     believe two wordings are training. Wraps at 400 px — no fixed width. */}
-                {advDualCaptions && !dualCaptionsSupport(trainType).supported && (
+                {advDualCaptions && !advDualCaptionsSupport.supported && (
                   <span className="text-amber-400 text-[0.6875rem] leading-relaxed">
-                    Ignored here: {dualCaptionsSupport(trainType).note}
+                    Ignored here: {advDualCaptionsSupport.note}
                   </span>
                 )}
                 <span className="text-content-subtle text-[0.6875rem] leading-relaxed">

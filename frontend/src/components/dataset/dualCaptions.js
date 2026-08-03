@@ -17,13 +17,40 @@ const FAMILY_LABEL = {
   flux: 'FLUX.1', flux2klein: 'FLUX.2 Klein', anima: 'Anima',
 };
 
+/** Does this family cache text embeddings when nobody says otherwise?
+    Mirrors lora_training._cache_text_embeddings_eff: Krea 2 and Anima emit the
+    cache in their own recipe, every other family only when asked. */
+export function cacheTextEmbeddingsDefault(family) {
+  return DUAL_CAPTION_UNSUPPORTED_FAMILIES.includes(family);
+}
+
+/** What the run will ACTUALLY do: the stored override when it is a real
+    boolean, the family's own recipe otherwise (null/undefined = untouched). */
+export function cacheTextEmbeddingsEffective(value, family) {
+  return typeof value === 'boolean' ? value : cacheTextEmbeddingsDefault(family);
+}
+
 /**
  * @param {string} family training family id (`train_type`)
+ * @param {{cacheTextEmbeddings?: boolean|null}} [opts] the stored override
  * @returns {{supported: boolean, note: string}} `note` is empty when supported.
  */
-export function dualCaptionsSupport(family) {
-  if (!DUAL_CAPTION_UNSUPPORTED_FAMILIES.includes(family)) return { supported: true, note: '' };
+export function dualCaptionsSupport(family, { cacheTextEmbeddings } = {}) {
   const label = FAMILY_LABEL[family] || family;
+  // An override turns caching ON anywhere — and OFF on the two families that
+  // ship it. What decides is the effective value, never the family alone: a
+  // Krea run with the cache switched off CAN train both captions, and a Z-Image
+  // run with it switched on cannot.
+  if (!cacheTextEmbeddingsEffective(cacheTextEmbeddings, family)) {
+    return { supported: true, note: '' };
+  }
+  if (cacheTextEmbeddings === true && !cacheTextEmbeddingsDefault(family)) {
+    return {
+      supported: false,
+      note: 'Cache text embeddings is on, and ai-toolkit caches exactly one embedding per '
+        + 'image (the long caption) — turn it off to train both wordings.',
+    };
+  }
   return {
     supported: false,
     note: `${label} caches its text embeddings and unloads the text encoder, so the short `

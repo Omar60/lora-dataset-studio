@@ -936,6 +936,15 @@ const TOPICS = [
     app: { route: '/datasets?section=training' },
     tip: { trigger: 'dual-captions-advanced',
       text: 'New: train each image on a long AND a short caption (Advanced options → Dual captions) so the LoRA leans less on any single wording.' } },
+  // The text-embedding cache is a speed/VRAM knob with ONE real cost (frozen
+  // captions), so it earns its own topic rather than a line inside dual
+  // captions — people reach for it from "why is my run slow", not from captions.
+  { id: 'training.cache_text_embeddings', kind: 'setting', title: 'Cache captions (text embeddings)',
+    keywords: ['cache', 'text embeddings', 'cache_text_embeddings', 'speed', 'slow', 'faster',
+      'vram', 'memory', 'text encoder', 'unload', 'advanced', 'training', 'dual captions',
+      'short caption', 'zimage', 'z-image', 'krea', 'anima'],
+    guide: { chapter: 'settings-reference', anchor: 'training' },
+    app: { route: '/datasets?section=training' } },
   // Expert controls, not global Settings: factor is meaningful only for a LoKr
   // network, and the Krea fields intentionally surface one reported community
   // starting point without claiming its result transfers to every dataset.

@@ -48,6 +48,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
 // Newest first. Prepend new waves at the top.
 export const WHATS_NEW = [
   {
+    id: '2026-08-03-cache-captions-toggle',
+    date: '2026-08-03',
+    title: 'Cache your captions and get seconds per step back',
+    blurb:
+      'ai-toolkit can encode every caption once, before the first step, then free the text encoder — fewer seconds per step and several GB of VRAM back. Krea 2 and Anima always did it; on Z-Image, FLUX and SDXL it was reachable only by hand-editing a config. It is now a checkbox in Advanced options, next to Dual captions, and it states its two costs where you press it: captions are frozen at launch (re-captioning needs a new run), and Dual captions has nowhere to put its short wording, so the two cannot both be on.',
+    to: '/datasets?section=training',
+  },
+  {
     id: '2026-08-03-review-improvements-in-place',
     date: '2026-08-03',
     title: 'Keep or reject an improvement without leaving the comparison',
