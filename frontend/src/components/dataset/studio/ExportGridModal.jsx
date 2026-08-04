@@ -34,6 +34,10 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
   const [fileFormat, setFileFormat] = useState('jpeg');
   const [footer, setFooter] = useState(true);
   const [busy, setBusy] = useState(false);
+  /* Markdown is the same run, read by something that cannot look at a picture —
+     a diff, a search, or a model asked "which epoch should I keep?". Tile size,
+     the footer and the size cap are all about pixels, so they leave with it. */
+  const isReport = fileFormat === 'md';
 
   // Rough final-size estimate to warn (before composing) when the server will
   // downscale to the 8000px cap. Blocks = 1 when a single format is picked, else
@@ -73,7 +77,8 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
       }
       const blob = await res.blob();
       const downscaled = res.headers.get('X-Grid-Downscaled') === '1';
-      const name = _nameFromDisposition(res.headers.get('Content-Disposition')) || 'lora-grid.jpg';
+      const name = _nameFromDisposition(res.headers.get('Content-Disposition'))
+        || (isReport ? 'lora-report.md' : 'lora-grid.jpg');
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -82,9 +87,9 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      toast.success(downscaled
-        ? 'Grid exported — downscaled to fit the size cap'
-        : 'Grid exported');
+      toast.success(isReport
+        ? 'Report exported'
+        : (downscaled ? 'Grid exported — downscaled to fit the size cap' : 'Grid exported'));
       onClose();
     } catch {
       toast.error('Export failed — please try again');
@@ -110,6 +115,14 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
             ? `Composes these ${imageIds.length} Canvas images into one grid, in their current order.`
             : 'Composes this run into one labelled image (checkpoints × strengths) — ready to post.'}
         </p>
+        {isReport && (
+          <p className="text-content-subtle text-[0.6875rem] leading-snug rounded-lg border border-border bg-app px-2 py-1.5">
+            The same run as Markdown: the grid as tables, each cell's face-similarity score, the
+            per-checkpoint means and the ranking — plus a legend saying what the number is. Made to
+            be pasted into an assistant, diffed between runs, or searched. Only file names travel,
+            never their folder.
+          </p>
+        )}
 
         {/* Format block */}
         {!canvasMode && <label className="flex flex-col gap-1">
@@ -122,7 +135,7 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
         </label>}
 
         {/* Tile size */}
-        <div className="flex flex-col gap-1">
+        <div className={`flex flex-col gap-1 ${isReport ? 'hidden' : ''}`}>
           <span className="text-content-muted text-[0.625rem] uppercase">Tile size</span>
           <div className="flex gap-2">
             {[512, 768].map((sz) => (
@@ -140,7 +153,7 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
         <div className="flex flex-col gap-1">
           <span className="text-content-muted text-[0.625rem] uppercase">File format</span>
           <div className="flex gap-2">
-            {[['jpeg', 'JPEG (small)'], ['png', 'PNG (large)']].map(([v, lbl]) => (
+            {[['jpeg', 'JPEG (small)'], ['png', 'PNG (large)'], ['md', 'Report (.md)']].map(([v, lbl]) => (
               <button key={v} type="button" onClick={() => setFileFormat(v)}
                 className={`px-3 py-1.5 rounded-lg border text-[0.75rem] ${fileFormat === v
                   ? 'border-indigo-400/60 bg-indigo-500/15 text-indigo-200'
@@ -159,13 +172,13 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
             <span className="block text-content-subtle text-[0.625rem]">Off by default — prompts can be personal or NSFW.</span>
           </span>
         </label>}
-        <label className="flex items-center gap-2 cursor-pointer">
+        <label className={`items-center gap-2 cursor-pointer ${isReport ? 'hidden' : 'flex'}`}>
           <input type="checkbox" checked={footer}
             onChange={(e) => setFooter(e.target.checked)} />
           <span className="text-[0.75rem] text-content">“Made with LoRA Dataset Studio” footer</span>
         </label>
 
-        {willDownscale && (
+        {willDownscale && !isReport && (
           <p className="text-amber-300/90 text-[0.625rem] rounded-lg border border-amber-400/30 bg-amber-500/10 px-2 py-1.5">
             Large grid — the image will be downscaled to fit an {MAX_CANVAS_SIDE}px cap.
           </p>
@@ -178,7 +191,7 @@ export default function ExportGridModal({ open, onClose, datasetId, family, run,
           </button>
           <button type="button" onClick={doExport} disabled={busy}
             className="px-4 py-1.5 rounded-lg bg-gradient-primary text-white text-[0.75rem] font-semibold disabled:opacity-60">
-            {busy ? 'Composing…' : '⬇ Export'}
+            {busy ? (isReport ? 'Writing…' : 'Composing…') : (isReport ? '⬇ Export report' : '⬇ Export')}
           </button>
         </div>
       </div>

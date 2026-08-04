@@ -226,18 +226,23 @@ def collect_grid(user_id, dataset_id, *, family=None, run_seed=None, prompt=None
         for cp in checkpoints:
             cells = []
             # Parallel to `cells` (None where the cell is empty or unscored), so
-            # every existing reader of `cells` keeps working untouched.
-            scores = []
+            # every existing reader of `cells` keeps working untouched. `ratings`
+            # only reaches the Markdown report — a vote is a judgement the reader
+            # of a report needs and a shared PNG has no room for.
+            scores, ratings = [], []
             for s in strengths:
                 rep = _pick_representative(by_cell.get((cp, s), []))
                 if rep:
                     cells.append(os.path.join(ds_dir, rep.filename))
                     scores.append(_cell_score(rep))
+                    ratings.append(rep.rating if rep.rating in (1, -1) else 0)
                     n_cells += 1
                 else:
                     cells.append(None)
                     scores.append(None)
-            row_dicts.append({'label': cp_label[cp], 'cells': cells, 'scores': scores})
+                    ratings.append(0)
+            row_dicts.append({'label': cp_label[cp], 'cells': cells,
+                              'scores': scores, 'ratings': ratings})
         blocks.append({
             'header': _variant_header(z_label, b_aspect, cfg, steps, steps2),
             'col_labels': [_fmt_strength(s) for s in strengths],
@@ -682,6 +687,107 @@ def _paint(draw, img, title, subtitle, prompt, footer_text, blocks, plan, layout
         y += round(22 * scale)
 
 
+# --- Markdown report ----------------------------------------------------------
+def _md_cell(score, rating) -> str:
+    """One table cell: the percent, a vote marker, or why there is no number."""
+    if score is None:
+        return '—'
+    mark = ' 👍' if rating == 1 else (' 👎' if rating == -1 else '')
+    return f'{round(score * 100)}%{mark}'
+
+
+def _md_escape(text) -> str:
+    """Pipes would silently split a table column; nothing else needs escaping."""
+    return str(text or '').replace('|', '\\|').replace('\n', ' ').strip()
+
+
+def _mean_percent(scores) -> "int | None":
+    real = [s for s in scores if s is not None]
+    return round(sum(real) / len(real) * 100) if real else None
+
+
+def render_report_md(grid, *, prompt=None) -> str:
+    """One run as a Markdown report — the same numbers as the PNG, in a form a
+    model (or a diff) can read.
+
+    The PNG is for the eye and for posting; it cannot be searched, diffed, or
+    handed to an assistant with "which epoch should I keep?". This is that
+    artefact: the grid as tables, plus the per-checkpoint means and the ranking
+    the eye would have to compute by hand.
+
+    Written to be read COLD: the legend states what the number is (a raw ArcFace
+    cosine, not a probability) and what the thresholds were, because a report
+    that only prints 62% invites a reader who has never used the app to invent a
+    meaning for it. Only file BASENAMES are emitted — a report is made to be
+    pasted somewhere else, and a machine path is exactly what should not travel
+    with it.
+    """
+    green, orange = _face_thresholds()
+    lines = [f'# LoRA test report — {_md_escape(grid["title"])}', '']
+    facts = [f'- **Run**: {_md_escape(grid["subtitle"])}']
+    if grid.get('run_seed') is not None:
+        facts.append(f'- **Seed**: {grid["run_seed"]}')
+    facts.append(f'- **Cells**: {grid["n_cells"]} across {len(grid["blocks"])} format block(s)')
+    if prompt:
+        facts.append(f'- **Prompt**: `{_md_escape(prompt)}`')
+    lines += facts + ['']
+
+    lines += [
+        '## How to read this',
+        '',
+        'Each percentage is one generated image scored against the reference photo of the',
+        'dataset it was trained from:',
+        'the raw **ArcFace cosine × 100**, *not* a probability that it is the same person.',
+        f'Thresholds in force: **≥ {round(green * 100)}%** strong · **≥ {round(orange * 100)}%** borderline ·',
+        'below that, weak. Two images of the same person in different shots typically land at',
+        '50–75%; different people sit under 35%. Use it to COMPARE the cells, not as a verdict.',
+        '',
+        '`—` = nothing generated for that combination, or the scorer refused to judge the face',
+        '(no face found, extreme pose, unreadable). 👍/👎 = the vote given in the Studio.',
+        '',
+    ]
+
+    ranking = []
+    for block in grid['blocks']:
+        lines += [f'## {_md_escape(block["header"]) or "Run"}', '']
+        header = ['Checkpoint'] + [f'×{c}' for c in block['col_labels']] + ['mean']
+        lines.append('| ' + ' | '.join(header) + ' |')
+        lines.append('|' + '---|' * len(header))
+        for row in block['rows']:
+            scores = row.get('scores') or [None] * len(row['cells'])
+            ratings = row.get('ratings') or [0] * len(row['cells'])
+            mean = _mean_percent(scores)
+            cells = [_md_cell(scores[i] if i < len(scores) else None,
+                              ratings[i] if i < len(ratings) else 0)
+                     for i in range(len(block['col_labels']))]
+            lines.append('| ' + ' | '.join(
+                [_md_escape(row['label'])] + cells + [f'{mean}%' if mean is not None else '—']) + ' |')
+            if mean is not None:
+                best = max((s for s in scores if s is not None), default=None)
+                ranking.append((mean, best, row['label']))
+        lines.append('')
+
+    if ranking:
+        lines += ['## Ranking by mean face similarity', '']
+        for i, (mean, best, label) in enumerate(sorted(ranking, reverse=True), start=1):
+            lines.append(f'{i}. **{_md_escape(label)}** — mean {mean}%, best cell '
+                         f'{round(best * 100)}%')
+        lines += ['',
+                  '> A mean is not a verdict: a checkpoint can win on similarity and still be the',
+                  '> one that burned the skin texture. Read it next to the images.', '']
+
+    lines += ['## Files', '', '| Checkpoint | Strength | Image |', '|---|---|---|']
+    for block in grid['blocks']:
+        for row in block['rows']:
+            for i, col in enumerate(block['col_labels']):
+                path = row['cells'][i] if i < len(row['cells']) else None
+                if path:
+                    lines.append(f'| {_md_escape(row["label"])} | ×{col} '
+                                 f'| `{os.path.basename(path)}` |')
+    lines += ['', f'*{FOOTER_TEXT}*', '']
+    return '\n'.join(lines)
+
+
 # --- Orchestration ------------------------------------------------------------
 def _sanitize_name(s: str) -> str:
     keep = ''.join(c if (c.isalnum() or c in '-_') else '_' for c in (s or ''))
@@ -714,6 +820,18 @@ def export_grid(user_id, dataset_id, *, family=None, run_seed=None, prompt=None,
     if include_prompt and grid.get('prompt'):
         p = grid['prompt'].strip()
         shown_prompt = (p[:_PROMPT_MAX_CHARS].rstrip() + '…') if len(p) > _PROMPT_MAX_CHARS else p
+
+    # Markdown leaves before any pixel is touched: the report IS the grid's
+    # numbers, so it costs a text join rather than a full compose + encode.
+    if str(fmt).lower() in ('md', 'markdown'):
+        text = render_report_md(grid, prompt=shown_prompt)
+        asp = _sanitize_name(grid['aspect']) if grid['aspect'] and grid['aspect'] != 'all' else 'all'
+        tail = 'canvas' if image_ids is not None else f'{asp}_seed{grid["run_seed"]}'
+        return (text.encode('utf-8'), 'text/markdown; charset=utf-8',
+                {'downscaled': False, 'width': 0, 'height': 0,
+                 'n_cells': grid['n_cells'], 'n_blocks': len(grid['blocks']),
+                 'download_name': f'lora-report_{_sanitize_name(grid["title"])}_{tail}.md',
+                 'format': 'md'})
 
     if image_ids is not None:
         block = grid['blocks'][0]

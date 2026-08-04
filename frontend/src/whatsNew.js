@@ -48,6 +48,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
 // Newest first. Prepend new waves at the top.
 export const WHATS_NEW = [
   {
+    id: '2026-08-04-studio-markdown-report',
+    date: '2026-08-04',
+    title: 'Export a run as a Markdown report — and hand it to an assistant',
+    blurb:
+      'Export grid now offers a third format: Report (.md). Same run, written instead of drawn — the grid as tables, the face-similarity score and vote of every cell, the per-checkpoint means, and the ranking those means imply. It opens with a legend saying what the number actually is (a raw ArcFace cosine, not a probability) and which thresholds produced it, so a model reading it cold cannot invent a meaning for "62%". Only file names travel, never the folder they live in. Paste it into a chat, diff two runs, or search it — none of which a PNG can do.',
+    to: '/studio',
+  },
+  {
     id: '2026-08-04-grid-export-face-scores',
     date: '2026-08-04',
     title: 'Exported grids now carry the face score of every tile',

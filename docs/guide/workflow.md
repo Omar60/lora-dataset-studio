@@ -338,7 +338,10 @@ A trained LoRA is not automatically a good LoRA. Test Studio compares checkpoint
 - flip adjacent variants in place and export a labelled grid — each tile carries its
   face-similarity percentage (green / amber / red on your Settings thresholds) when the
   run has been scored, so the exported PNG still answers "which of these is still the
-  same person" weeks later, away from the app.
+  same person" weeks later, away from the app. The same export also writes a
+  **Markdown report** (`Report (.md)` in the format row): the grid as tables, the
+  per-checkpoint means and the ranking, with a legend stating what the number is —
+  made to be diffed between runs or pasted into an assistant, which a PNG cannot be.
 
 Open Studio straight from a run in the Runs hub; the dataset is preselected. If ComfyUI drops during a batch, the current cell becomes **paused** and later cells are not submitted against potentially different state. Restart/recover ComfyUI, cancel the paused batch, then choose explicitly what to resume. See [Recover a paused Test Studio batch](using-the-app.md#recover-a-paused-test-studio-batch).
 

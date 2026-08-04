@@ -1993,7 +1993,12 @@ def lora_test_export_grid(dataset_id):
     DB-only + PIL (no ComfyUI, so ungated). Body: {family, run_seed, prompt (run
     identity — null = most recent run), aspect ('16:9'… or 'all'), include_prompt
     (default false — prompts can be personal/NSFW), cell_size (512|768), format
-    ('jpeg'|'png'), footer (bool)}. 404 unknown dataset ; 409 empty/unknown run."""
+    ('jpeg'|'png'|'md'), footer (bool)}. 404 unknown dataset ; 409 empty/unknown run.
+
+    format='md' returns the same run as a Markdown REPORT instead of an image:
+    the grid as tables, the per-checkpoint means and the ranking — readable by a
+    diff, a search, or a model asked "which epoch should I keep?". Image-only
+    options (cell_size, footer) are ignored on that path."""
     if not svc.get_dataset(LOCAL_USER, dataset_id):
         return jsonify({'error': 'not found'}), 404
     d = request.get_json(silent=True) or {}

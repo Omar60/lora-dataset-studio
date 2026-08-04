@@ -416,3 +416,80 @@ def test_render_draws_the_pill_only_where_there_is_a_score(tmp_path):
     # Only the scored cell changed: the second half of the row is untouched.
     assert (a.crop((a.size[0] // 2, 0, a.size[0], a.size[1])).tobytes()
             == b.crop((b.size[0] // 2, 0, b.size[0], b.size[1])).tobytes())
+
+
+# --- Markdown report -----------------------------------------------------------
+def _report_grid():
+    """A run with everything the report has to survive: a vote, an unscored cell,
+    a missing cell, and paths that must not travel."""
+    return {
+        'title': 'zchar', 'subtitle': 'Z-Image · seed 771', 'family': 'zimage',
+        'aspect': 'all', 'run_seed': 771, 'prompt': 'zchar, portrait', 'n_cells': 5,
+        'blocks': [{'header': 'FORMAT 3:4 · CFG 1.0', 'col_labels': ['0.5', '1.0'],
+                    'rows': [
+                        {'label': 'zchar · 2000 steps',
+                         'cells': [os.path.join('C:', 'Users', 'someone', 'a.png'),
+                                   os.path.join('C:', 'Users', 'someone', 'b.png')],
+                         'scores': [0.81, 0.61], 'ratings': [0, 1]},
+                        {'label': 'zchar · 2500 steps',
+                         'cells': [os.path.join('C:', 'Users', 'someone', 'c.png'), None],
+                         'scores': [None, None], 'ratings': [0, 0]},
+                    ]}]}
+
+
+def test_report_md_tables_the_scores_and_ranks_the_checkpoints(app):
+    from app.services import studio_grid_export as sge
+    with app.app_context():
+        md = sge.render_report_md(_report_grid(), prompt='zchar, portrait')
+    assert '# LoRA test report — zchar' in md
+    # The cells, the vote, and the per-checkpoint mean.
+    assert '| zchar · 2000 steps | 81% | 61% 👍 | 71% |' in md
+    # A row the scorer never judged prints dashes, never 0 %.
+    assert '| zchar · 2500 steps | — | — | — |' in md
+    assert '| 0%' not in md        # a dash, never a fabricated zero
+    # Ranking exists and puts the better mean first.
+    assert md.index('1. **zchar · 2000 steps**') < md.index('## Files')
+    assert '2. **' not in md          # the unscored checkpoint cannot be ranked
+
+
+def test_report_md_states_the_thresholds_it_was_written_with(app):
+    """Read cold, "62%" means nothing — the legend is what makes the number usable
+    by someone (or something) that has never opened the app."""
+    from app.services import studio_grid_export as sge
+    with app.app_context():
+        md = sge.render_report_md(_report_grid())
+        green, orange = sge._face_thresholds()
+    assert f'**≥ {round(green * 100)}%** strong' in md
+    assert f'**≥ {round(orange * 100)}%** borderline' in md
+    assert 'not* a probability' in md
+
+
+def test_report_md_never_carries_a_machine_path(app):
+    """A report is made to be pasted elsewhere; the one thing that must not travel
+    with it is where the user's files live."""
+    from app.services import studio_grid_export as sge
+    with app.app_context():
+        md = sge.render_report_md(_report_grid())
+    assert 'Users' not in md and 'someone' not in md
+    assert '`a.png`' in md and '`b.png`' in md
+
+
+def test_report_md_omits_the_prompt_unless_it_was_asked_for(app):
+    from app.services import studio_grid_export as sge
+    with app.app_context():
+        assert 'zchar, portrait' not in sge.render_report_md(_report_grid())
+        assert '`zchar, portrait`' in sge.render_report_md(_report_grid(), prompt='zchar, portrait')
+
+
+def test_export_grid_md_returns_markdown_not_an_image(app, tmp_path):
+    from app.services import studio_grid_export as sge
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds_id = _make_run(app, tmp_path, run_seed=773,
+                          checkpoints=['z image\lora_troubeau_000002000.safetensors'],
+                          strengths=[1.0])
+        data, mime, meta = sge.export_grid(LOCAL_USER, ds_id, fmt='md')
+        assert mime.startswith('text/markdown')
+        assert meta['format'] == 'md' and meta['download_name'].endswith('.md')
+        assert meta['downscaled'] is False and meta['n_cells'] == 1
+        assert data.decode('utf-8').startswith('# LoRA test report')
