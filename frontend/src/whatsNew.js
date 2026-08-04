@@ -48,6 +48,14 @@ import { SETUP_DEEP_LINK_STEPS } from './hooks/useSetupSteps.js';
 // Newest first. Prepend new waves at the top.
 export const WHATS_NEW = [
   {
+    id: '2026-08-04-grid-export-face-scores',
+    date: '2026-08-04',
+    title: 'Exported grids now carry the face score of every tile',
+    blurb:
+      'The exported grid told you the prompt, the checkpoint and the strength — everything except the one number a picture cannot show: whether that checkpoint still renders the same person. Each tile now carries its face-similarity percentage in the corner, coloured on your own Settings thresholds (green / amber / red). Tiles the scorer refused to judge (no face, profile) stay bare rather than print a misleading 0 %, and a run that was never scored exports exactly as before.',
+    to: '/studio',
+  },
+  {
     id: '2026-08-03-cache-captions-toggle',
     date: '2026-08-03',
     title: 'Cache your captions and get seconds per step back',

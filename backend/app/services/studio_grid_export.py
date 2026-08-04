@@ -38,6 +38,14 @@ _TEXT = (231, 233, 238)     # primary text
 _MUTED = (150, 158, 168)    # secondary text
 _HEADER = (185, 191, 255)   # block header (indigo tint)
 _ACCENT = (139, 147, 255)   # accent line
+# Face-similarity pill, on the SAME three thresholds the Studio tiles use. The
+# grid is the artefact people keep and compare weeks later, and "is this still
+# the same person" is exactly the question a picture cannot answer on its own —
+# so the number rides on the tile it belongs to.
+_SCORE_BG = (0, 0, 0)       # pill backdrop, drawn over the image
+_SCORE_GREEN = (134, 239, 172)
+_SCORE_AMBER = (252, 211, 77)
+_SCORE_RED = (252, 165, 165)
 
 # Hard cap on the final image's longest side (px). Beyond this the whole canvas is
 # downscaled (LANCZOS) — a large sweep stays under a sane pixel budget for upload.
@@ -88,6 +96,35 @@ def _variant_header(z_model_label, aspect, cfg, steps, steps2) -> str:
     if steps is not None:
         parts.append(f'{steps}{"/" + str(steps2) if steps2 is not None else ""} STEPS')
     return ' · '.join(parts)
+
+
+def _face_thresholds() -> tuple[float, float]:
+    """Settings ▸ face scoring, with the shipped defaults as the fallback."""
+    from ..config import get as cfg_get
+    green = cfg_get('face_scoring.green')
+    orange = cfg_get('face_scoring.orange')
+    return (float(green) if isinstance(green, (int, float)) else 0.50,
+            float(orange) if isinstance(orange, (int, float)) else 0.45)
+
+
+def _cell_score(row) -> "float | None":
+    """The cosine to print on one tile, or None when there is nothing to print.
+
+    A row the scorer refused to judge (no face, profile, unreadable) carries a
+    state, not a number: printing 0 % there would read as "not this person",
+    which is the opposite of what the scorer actually said.
+    """
+    if getattr(row, 'face_state', None) not in (None, 'scorable'):
+        return None
+    value = getattr(row, 'face_score', None)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _score_color(score: float, thresholds):
+    green, orange = thresholds
+    if score >= green:
+        return _SCORE_GREEN
+    return _SCORE_AMBER if score >= orange else _SCORE_RED
 
 
 def _pick_representative(cells: list) -> "LoraTestImage | None":
@@ -188,14 +225,19 @@ def collect_grid(user_id, dataset_id, *, family=None, run_seed=None, prompt=None
         row_dicts = []
         for cp in checkpoints:
             cells = []
+            # Parallel to `cells` (None where the cell is empty or unscored), so
+            # every existing reader of `cells` keeps working untouched.
+            scores = []
             for s in strengths:
                 rep = _pick_representative(by_cell.get((cp, s), []))
                 if rep:
                     cells.append(os.path.join(ds_dir, rep.filename))
+                    scores.append(_cell_score(rep))
                     n_cells += 1
                 else:
                     cells.append(None)
-            row_dicts.append({'label': cp_label[cp], 'cells': cells})
+                    scores.append(None)
+            row_dicts.append({'label': cp_label[cp], 'cells': cells, 'scores': scores})
         blocks.append({
             'header': _variant_header(z_label, b_aspect, cfg, steps, steps2),
             'col_labels': [_fmt_strength(s) for s in strengths],
@@ -353,6 +395,27 @@ def _image_size(path):
             return im.size
     except Exception:
         return None
+
+
+def _draw_score_pill(draw, x, y, score, font, scale, thresholds) -> None:
+    """`62%` in the tile's top-left corner, on the scorer's own three tones.
+
+    Percent rather than the raw cosine: the grid is read at a glance, next to
+    other numbers, and 0.62 invites being read as a probability. The tooltip that
+    carries the exact cosine in the app has no equivalent on a PNG, so the value
+    printed is the one that cannot mislead on its own.
+    """
+    text = f'{round(score * 100)}%'
+    pad_x, pad_y = max(3, round(7 * scale)), max(2, round(4 * scale))
+    off = max(3, round(6 * scale))
+    tw = draw.textlength(text, font=font)
+    box = font.getbbox('Ayg')
+    th = box[3] - box[1]
+    x0, y0 = x + off, y + off
+    draw.rounded_rectangle([x0, y0, x0 + tw + 2 * pad_x, y0 + th + 2 * pad_y],
+                           radius=max(2, round(5 * scale)), fill=_SCORE_BG)
+    draw.text((x0 + pad_x, y0 + pad_y - box[1]), text, font=font,
+              fill=_score_color(score, thresholds))
 
 
 def _plan(blocks, cell_long, draw, cache):
@@ -544,6 +607,8 @@ def _paint(draw, img, title, subtitle, prompt, footer_text, blocks, plan, layout
     M, gap, pad, scale = plan['M'], plan['gap'], plan['pad'], plan['scale']
     f_title, f_sub, f_hdr = plan['f_title'], plan['f_sub'], plan['f_hdr']
     f_lbl, f_foot = plan['f_lbl'], plan['f_foot']
+    f_score = _font(21 * scale)
+    thresholds = _face_thresholds()
     Lw = plan['Lw']
     title_h = f_title.getbbox('Ayg')[3] - f_title.getbbox('Ayg')[1]
 
@@ -603,6 +668,12 @@ def _paint(draw, img, title, subtitle, prompt, footer_text, blocks, plan, layout
                     oy = row_top + (ch - tile.size[1]) // 2
                     img.paste(tile, (ox, oy))
                     draw.rectangle(box, outline=_BORDER, width=max(1, round(scale)))
+                    # Pinned to the TILE, not the cell box: a letterboxed tile
+                    # leaves dead margin inside the cell, and a pill floating in
+                    # it would read as belonging to the neighbour.
+                    score = (row.get('scores') or [None] * g['n_cols'])[i]                         if i < len(row.get('scores') or ()) else None
+                    if score is not None:
+                        _draw_score_pill(draw, ox, oy, score, f_score, scale, thresholds)
                 else:
                     # Missing cell (checkpoint not tested at this strength) — a clean
                     # blank panel keeps the XY grid aligned without a noisy glyph.

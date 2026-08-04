@@ -351,3 +351,68 @@ def test_export_grid_empty_run_raises_grid_export_empty(app):
         ds = svc.create_dataset(LOCAL_USER, 'Empty2', 'troubeau')
         with pytest.raises(sge.GridExportEmpty):
             sge.export_grid(LOCAL_USER, ds.id)
+
+
+# --- Face similarity on the exported tiles -------------------------------------
+def test_collect_grid_carries_the_face_score_of_each_cell(app, tmp_path):
+    """The exported grid is judged weeks later, away from the app: the number that
+    says whether a checkpoint still renders the same person has to travel with it."""
+    from app.services import studio_grid_export as sge, face_dataset_service as svc
+    from app.models import LoraTestImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        cks = ['z image\\lora_troubeau_000002000.safetensors']
+        ds_id = _make_run(app, tmp_path, run_seed=771, checkpoints=cks, strengths=[0.5, 1.0])
+        rows = (LoraTestImage.query.filter_by(dataset_id=ds_id)
+                .order_by(LoraTestImage.strength).all())
+        rows[0].face_score, rows[0].face_state = 0.6181, 'scorable'
+        # A face the scorer refused to judge: a state, not a number.
+        rows[1].face_score, rows[1].face_state = None, 'extreme_pose'
+        svc.db.session.commit()
+        grid = sge.collect_grid(LOCAL_USER, ds_id)
+        assert grid['blocks'][0]['rows'][0]['scores'] == [0.6181, None]
+
+
+def test_collect_grid_ignores_a_score_the_scorer_disowned(app, tmp_path):
+    """'scorable' is what makes a number real. A leftover value under any other
+    state must not be printed — 0 % on a profile shot reads as 'not this person'."""
+    from app.services import studio_grid_export as sge, face_dataset_service as svc
+    from app.models import LoraTestImage
+    from app.config import LOCAL_USER
+    with app.app_context():
+        ds_id = _make_run(app, tmp_path, run_seed=772,
+                          checkpoints=['z image\\lora_troubeau_000002000.safetensors'],
+                          strengths=[1.0])
+        row = LoraTestImage.query.filter_by(dataset_id=ds_id).one()
+        row.face_score, row.face_state = 0.42, 'no_face'
+        svc.db.session.commit()
+        assert sge.collect_grid(LOCAL_USER, ds_id)['blocks'][0]['rows'][0]['scores'] == [None]
+
+
+def test_score_pill_uses_the_configured_thresholds(app):
+    from app.services import studio_grid_export as sge
+    with app.app_context():
+        green, orange = sge._face_thresholds()
+        assert sge._score_color(green, (green, orange)) == sge._SCORE_GREEN
+        assert sge._score_color(orange, (green, orange)) == sge._SCORE_AMBER
+        assert sge._score_color(orange - 0.01, (green, orange)) == sge._SCORE_RED
+
+
+def test_render_draws_the_pill_only_where_there_is_a_score(tmp_path):
+    """Same grid twice: with scores it must differ from the plain render, and a
+    block with no `scores` key at all (Canvas) must render exactly as before."""
+    from app.services import studio_grid_export as sge
+    paths = [str(tmp_path / f'c{i}.png') for i in range(2)]
+    for p in paths:
+        _tile(p, 64, 36, (80, 90, 120))
+    plain = [{'header': 'H', 'col_labels': ['1.0', '1.4'],
+              'rows': [{'label': 'ckpt', 'cells': paths}]}]
+    scored = [{'header': 'H', 'col_labels': ['1.0', '1.4'],
+               'rows': [{'label': 'ckpt', 'cells': paths, 'scores': [0.81, None]}]}]
+    a, _ = sge.render_grid_image('t', 's', plain)
+    b, _ = sge.render_grid_image('t', 's', scored)
+    assert a.size == b.size                       # the pill never changes geometry
+    assert a.tobytes() != b.tobytes()             # ... and it IS drawn
+    # Only the scored cell changed: the second half of the row is untouched.
+    assert (a.crop((a.size[0] // 2, 0, a.size[0], a.size[1])).tobytes()
+            == b.crop((b.size[0] // 2, 0, b.size[0], b.size[1])).tobytes())

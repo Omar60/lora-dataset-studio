@@ -335,7 +335,10 @@ A trained LoRA is not automatically a good LoRA. Test Studio compares checkpoint
 - compare several LoRAs from the same model family;
 - turn an image into a prompt with local vision, or draw a random non-empty caption from a chosen dataset;
 - vote, compute a Wilson ranking and optionally rank Character results by face similarity;
-- flip adjacent variants in place and export a labelled grid.
+- flip adjacent variants in place and export a labelled grid — each tile carries its
+  face-similarity percentage (green / amber / red on your Settings thresholds) when the
+  run has been scored, so the exported PNG still answers "which of these is still the
+  same person" weeks later, away from the app.
 
 Open Studio straight from a run in the Runs hub; the dataset is preselected. If ComfyUI drops during a batch, the current cell becomes **paused** and later cells are not submitted against potentially different state. Restart/recover ComfyUI, cancel the paused batch, then choose explicitly what to resume. See [Recover a paused Test Studio batch](using-the-app.md#recover-a-paused-test-studio-batch).
 
