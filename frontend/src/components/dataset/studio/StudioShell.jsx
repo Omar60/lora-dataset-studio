@@ -41,13 +41,17 @@ export default function StudioShell({ preselectDataset = null, preselectFamily =
   // Liste des bases correspondant au train_type courant.
   // Fetch à chaque changement de runType via /api/studio/base-models?type=…
   const [baseModels, setBaseModels] = useState([]);
+  // Échelles CFG/steps de la famille, servies par le MÊME appel (clé `axes`).
+  // Sans elles, la branche comparaison/blend n'avait aucun axe de rendu à
+  // proposer — c'est ce qui la privait du réglage des steps (bug signalé).
+  const [axes, setAxes] = useState(null);
   useEffect(() => {
-    if (!runType) { setBaseModels([]); return; }
+    if (!runType) { setBaseModels([]); setAxes(null); return; }
     let cancelled = false;
     fetch(`/api/studio/base-models?type=${encodeURIComponent(runType)}`, { credentials: 'include' })
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then((d) => { if (!cancelled) setBaseModels(d.models || []); })
-      .catch(() => { if (!cancelled) setBaseModels([]); });
+      .then((d) => { if (!cancelled) { setBaseModels(d.models || []); setAxes(d.axes || null); } })
+      .catch(() => { if (!cancelled) { setBaseModels([]); setAxes(null); } });
     return () => { cancelled = true; };
   }, [runType]);
 
@@ -65,7 +69,7 @@ export default function StudioShell({ preselectDataset = null, preselectFamily =
         <h1 className="text-content font-bold flex items-center gap-2">🧪 Test Studio<HelpBadge topic="page-studio" /></h1>
         {comparison && (
           <span className="px-2 py-0.5 rounded-lg border border-amber-400/40 bg-amber-400/10 text-amber-200 text-[0.6875rem] font-semibold">
-            {/* Neutre : le mode réel (⚖ Compare / 🧬 Combine) est choisi et affiché
+            {/* Neutre : le mode réel (⚖ Compare / 🧬 Blend) est choisi et affiché
                 juste en dessous par LoraStackPanel — annoncer « Comparing » ici
                 mentirait dès que la pile est active. */}
             {selection.length} LoRAs checked
@@ -80,7 +84,8 @@ export default function StudioShell({ preselectDataset = null, preselectFamily =
       </div>
 
       {comparison ? (
-        <ComparisonStudio selection={selection} baseModels={baseModels} runType={runType} />
+        <ComparisonStudio selection={selection} baseModels={baseModels} axes={axes}
+          runType={runType} />
       ) : soloDatasetId ? (
         // `key` force un remontage propre quand on change de LoRA solo OU de famille
         // (reset des hooks/état du studio riche — sinon on garderait la grille du précédent).

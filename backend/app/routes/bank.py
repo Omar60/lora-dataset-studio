@@ -228,10 +228,19 @@ def bank_images(bank_id):
         subfolder=subfolder if subfolder is not None else None,
         search=args.get('search') or None,
         exclude=args.get('exclude') or None,
+        # 🏷️ chips ticked off one image's caption. Its OWN key, never folded into
+        # `search` or `exclude`: two features sharing one payload key is how a
+        # filter silently ate a sibling's field once already.
+        tags=args.get('tags') or None,
         sort=args.get('sort') or None,
         res_bucket=args.get('res_bucket') or None,
         framing=args.get('framing') or None,
         origin=args.get('origin') or None,
+        # DEDICATED keys. Neither reuses `q`/`exclude`/`push_down` (the text
+        # lane) nor `flag` (the quality lane): a facet that shares a query key
+        # with another facet silently narrows the other one.
+        medium=args.get('medium') or None,
+        angle=args.get('angle') or None,
         ids=ids,
         # ids_only=1 answers {'ids': [...]} for the WHOLE filter in one request —
         # what ▶ Review and "Select all in filter" actually need. Same filters,
@@ -396,6 +405,30 @@ def bank_framing(bank_id):
                   rescan=bool(data.get('rescan')))
 
 
+@bp.post('/bank/<int:bank_id>/medium')
+def bank_medium(bank_id):
+    """Classify every scored image by MEDIUM (photo / anime / 3D render /
+    illustration, or an honest 'unsure') from the CLIP embeddings the ✨ Score
+    pass already cached. {rescan:true} re-classifies rows that already have a
+    verdict. 202 on launch · 409 when the bank is busy · 503 when ✨ Score has
+    not run here or CLIP cannot be reached. No GPU is taken and no image is
+    re-inferred."""
+    data = request.get_json(silent=True) or {}
+    return _start(banks.start_medium, _app(), LOCAL_USER, bank_id,
+                  rescan=bool(data.get('rescan')))
+
+
+@bp.post('/bank/<int:bank_id>/angles')
+def bank_angles(bank_id):
+    """Measure the head ANGLE of the images that were face-scanned before the
+    pass persisted it — an opt-in backfill, never automatic. Re-runs the face
+    detector on those rows ONLY, writes nothing but the yaw, and leaves the
+    person clusters untouched. 202/409/503; 400 when there is nothing to
+    backfill."""
+    return _start(banks.start_faces, _app(), LOCAL_USER, bank_id,
+                  angles_only=True)
+
+
 @bp.get('/bank/<int:bank_id>/coverage')
 def bank_coverage(bank_id):
     """Read-only coverage advice (idea by @antonp): what the kept set leans on and
@@ -411,12 +444,14 @@ def bank_coverage(bank_id):
 def bank_caption(bank_id):
     """Caption a selection (image_ids) or every non-rejected image, reusing the
     dataset caption engines. {force:true} re-captions already-captioned rows.
-    {vocabulary} picks the register ('explicit'|'clinical'|'safe') — same lane as
-    the dataset caption; invalid → 400. 202/409/503/400."""
+    {vocabulary} picks the register ('explicit'|'clinical'|'safe') and {length} the
+    size preset ('concise'|'detailed', absent = standard) — same lane as the dataset
+    caption; invalid → 400. 202/409/503/400."""
     data = request.get_json(silent=True) or {}
     return _start(banks.start_caption, _app(), LOCAL_USER, bank_id,
                   ids=data.get('image_ids') or None, force=bool(data.get('force')),
-                  vocabulary=data.get('vocabulary') or None)
+                  vocabulary=data.get('vocabulary') or None,
+                  length=data.get('length') or None)
 
 
 @bp.post('/bank/<int:bank_id>/pipeline')
@@ -651,6 +686,13 @@ def _curation_filters(data):
         # otherwise "select 60 diverse" would hand back the very images the user
         # just declared done.
         'exclude': data.get('exclude') or None,
+        # Same reason as exclude: a curation pick must not hand back images the
+        # grid is currently hiding.
+        'tags': data.get('tags') or None,
+        # 🎨 medium and ⤢ angle scope a curation pick exactly as they scope the
+        # grid, under their OWN keys.
+        'medium': data.get('medium') or None,
+        'angle': data.get('angle') or None,
     }
 
 
@@ -872,3 +914,154 @@ def bank_file(bank_id, image_id):
     if not path or not os.path.isfile(path):
         return jsonify({'error': 'file missing'}), 404
     return send_file(path, max_age=0)
+
+
+# --- "Single person here" — folder-level person assertions -------------------
+# The user knows their sources. A scraped folder is very often ONE person, and
+# making the embeddings pass rediscover that costs thousands of inferences for an
+# answer the folder name already gave. These endpoints let them say it, undo it,
+# and — separately — pay ~15 inferences to have the claim sampled.
+@bp.get('/bank/<int:bank_id>/folder-persons')
+def bank_folder_persons(bank_id):
+    from ..services import folder_person
+    data = folder_person.payload(LOCAL_USER, bank_id)
+    if data is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(data)
+
+
+def _asserted_subfolder_arg():
+    """The one place the request's subfolder is read. '' is a MEANINGFUL value
+    (the bank root), so absence is tested against None, never falsiness."""
+    data = request.get_json(silent=True) or {}
+    sub = data.get('subfolder')
+    if sub is None:
+        sub = request.args.get('subfolder')
+    return None if sub is None else str(sub)
+
+
+def _folder_person_error(e):
+    return jsonify({'error': str(e)}), 404 if 'bank not found' in str(e) else 400
+
+
+@bp.post('/bank/<int:bank_id>/folder-person')
+def bank_assert_folder_person(bank_id):
+    """Declare a subfolder to hold a single person. Synchronous and instant —
+    there is nothing to infer, which is the entire point."""
+    from ..services import folder_person
+    sub = _asserted_subfolder_arg()
+    if sub is None:
+        return jsonify({'error': 'subfolder is required'}), 400
+    try:
+        out = folder_person.assert_single_person(LOCAL_USER, bank_id, sub)
+    except ValueError as e:
+        return _folder_person_error(e)
+    return jsonify({'ok': True, **out})
+
+
+@bp.delete('/bank/<int:bank_id>/folder-person')
+def bank_revoke_folder_person(bank_id):
+    """Undo the assertion — the group dissolves and the folder goes back to
+    normal clustering. Only the ids the assertion wrote are cleared."""
+    from ..services import folder_person
+    sub = _asserted_subfolder_arg()
+    if sub is None:
+        return jsonify({'error': 'subfolder is required'}), 400
+    try:
+        out = folder_person.revoke(LOCAL_USER, bank_id, sub)
+    except ValueError as e:
+        return _folder_person_error(e)
+    return jsonify({'ok': True, **out})
+
+
+@bp.post('/bank/<int:bank_id>/folder-person/check')
+def bank_check_folder_person(bank_id):
+    """Sample check: ~15 images spread across the folder, embedded on their own
+    and compared at the clustering threshold. Informative only — whatever it
+    finds, the assertion stands until the user revokes it."""
+    from ..services import folder_person
+    sub = _asserted_subfolder_arg()
+    if sub is None:
+        return jsonify({'error': 'subfolder is required'}), 400
+    try:
+        folder_person.start_sample_check(_app(), LOCAL_USER, bank_id, sub)
+    except ValueError as e:
+        return _folder_person_error(e)
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 400
+    except bank_jobs.BankJobBusy as e:
+        return _busy(e)
+    return jsonify({'ok': True, 'sample_size': folder_person.SAMPLE_SIZE}), 202
+
+
+@bp.post('/bank/<int:bank_id>/folder-scan')
+def bank_scan_folder_persons(bank_id):
+    """Sample the unprobed subfolders and SUGGEST the ones that look like a
+    single person. It suggests only — nothing here groups an image; confirming
+    stays the one-click gesture it already was.
+
+    The same scan runs by itself at the end of 👤 Group by person, where it is
+    free (the embeddings are cached); this button is for asking before ever
+    running that pass, and it says what it costs."""
+    from ..services import folder_person
+    try:
+        folder_person.start_folder_scan(_app(), LOCAL_USER, bank_id)
+    except ValueError as e:
+        return _folder_person_error(e)
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 400
+    except bank_jobs.BankJobBusy as e:
+        return _busy(e)
+    return jsonify({'ok': True, 'sample_size': folder_person.SAMPLE_SIZE,
+                    'limit': folder_person.MAX_SCAN_FOLDERS}), 202
+
+
+# --- the preflight of 👤 Group by person -------------------------------------
+# The sampling above used to be reachable only from the Subfolder panel, which
+# the user who presses 🚀 Launch all never opens. These three endpoints put it in
+# front of the pass instead: what it would cost (GET), run it (POST), and confirm
+# the folders it found in one gesture (accept).
+@bp.get('/bank/<int:bank_id>/person-preflight')
+def bank_person_preflight_plan(bank_id):
+    """What the preflight would sample, what it would cost, and the verdicts it
+    already holds. Read-only — nothing is probed and nothing is grouped."""
+    from ..services import folder_person
+    data = folder_person.preflight_payload(LOCAL_USER, bank_id)
+    if data is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(data)
+
+
+@bp.post('/bank/<int:bank_id>/person-preflight')
+def bank_person_preflight(bank_id):
+    """Run the sampling as the preamble of the person pass. Same probe as
+    🔎 Scan folders with a far higher ceiling, because the alternative the user
+    just chose is one embedding per image over the whole bank."""
+    from ..services import folder_person
+    try:
+        folder_person.start_preflight(_app(), LOCAL_USER, bank_id)
+    except ValueError as e:
+        return _folder_person_error(e)
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 400
+    except bank_jobs.BankJobBusy as e:
+        return _busy(e)
+    return jsonify({'ok': True, 'sample_size': folder_person.SAMPLE_SIZE,
+                    'limit': folder_person.MAX_PREFLIGHT_FOLDERS}), 202
+
+
+@bp.post('/bank/<int:bank_id>/folder-persons/accept')
+def bank_accept_folder_persons(bank_id):
+    """Confirm several folders at once — the preflight's "yes to all". Every one
+    of them becomes an ordinary assertion; folders that could not be asserted come
+    back in `failed` rather than being dropped."""
+    from ..services import folder_person
+    data = request.get_json(silent=True) or {}
+    subs = data.get('subfolders')
+    if not isinstance(subs, list):
+        return jsonify({'error': 'subfolders must be a list'}), 400
+    try:
+        out = folder_person.accept_suggestions(LOCAL_USER, bank_id, subs)
+    except ValueError as e:
+        return _folder_person_error(e)
+    return jsonify({'ok': True, **out})

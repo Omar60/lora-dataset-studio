@@ -72,6 +72,458 @@ export const WHATS_NEW = [
     to: '/datasets?section=images',
   },
   {
+    id: '2026-08-04-fp8-quantize-runs-where-torch-lives',
+    date: '2026-08-04',
+    title: 'Quantizing to fp8 now actually runs — it uses an environment that has torch, and says so before you click if none does',
+    blurb:
+      'On a real install the conversion could not run at all: it ended on “No module named ‘safetensors’”, because it tried to do the work inside the app’s own Python — which ships without torch on purpose, since torch is gigabytes and nothing else here needs it. It now runs the conversion in a separate interpreter that has the dependencies, exactly like ✨ Score and the masking passes already do: the one ✨ Score uses, ai-toolkit’s, or whichever you set as `quantize.python`. And because “can this machine do it at all” is something you should learn before committing, it is checked while the plan is drawn: an environment without torch disables the button and tells you which environments would work and what to install, instead of failing thirty seconds in — or, worse, after a 26 GB download.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-04-fp8-disk-guard-says-yes-when-it-fits',
+    date: '2026-08-04',
+    title: 'The fp8 quantizer no longer refuses a conversion that fits — and a refusal now shows its arithmetic',
+    blurb:
+      'Two things were wrong with the disk check, and both showed up on a real 25.6 GB model. The panel said the conversion was fine, and the click that followed refused it: the threshold was only applied when starting, never when planning, so the button stayed enabled right up to the moment it was too late. And that threshold was a flat 30 GB, while the file being written was 12.8 GB and the drive had 17.6 GB free — an operation that fit twice over, refused by a number of our own. The budget is now derived from the job itself (what is left to download, the fp8 file’s own ceiling, and 2 GB of working headroom), every term is named in the refusal so you can check it, and whatever the plan accepts the start no longer rejects. Free space is also measured on the volume that really holds the folder, which matters because a ComfyUI models folder is very often a junction onto another drive. And when a drive genuinely is too full, the refusal offers to write the file to another folder instead of ending there.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-04-quantize-to-fp8-in-one-click',
+    date: '2026-08-04',
+    title: 'One click turns your full model into the fp8 file ComfyUI loads — nothing to type, and it works on a model that is only on Hugging Face',
+    blurb:
+      'The fp8 quantizer asked for an absolute path to a file on this machine, and the model most people want to shrink has no such path: a full-model run delivers its 26 GB master into your private Hugging Face repository and never downloads it. So the one full model you own was the one thing the tool could not touch. Now “✨ Quantize to fp8” sits right there in the full-model recipe, already aimed at the model your run delivered, and does the whole chain: fetches the master, converts it, and leaves the fp8 file in ComfyUI’s own models folder, ready to load. Before it starts it tells you which checkpoint it takes (a repository often holds the final save AND several 26 GB step snapshots whose names differ by a number — one rule now decides, and it is the same one that names the file on the card), which folder the file lands in, and what it costs in disk. The download reports its gigabytes, can be stopped, and resumes where it left off. Afterwards the master is kept by default, because it is the only copy you can train from again; deleting it is one radio button away with its size on it. The path field is still there for a file nothing in the app points at — and it now pre-fills itself with your custom training base.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-04-dense-quality-levers',
+    date: '2026-08-04',
+    title: 'Full-model training: choose how many images each step learns from, and how the learning rate moves',
+    blurb:
+      'A full-model Krea 2 run was training on ONE image per step — over a dataset of thousands, that is a very noisy idea of the right direction — at a flat learning rate from the first step to the last. Three settings in the recipe card change that. “Images per step” averages several images into each update, which steadies training on a big set; it needs no extra VRAM, only time, so the card tells you straight out that 4 images per step means a run about 4× longer and a rented GPU that costs about 4× as much. The learning-rate schedule can now warm up over the first steps instead of hitting a 12B model at full rate immediately, or fade to zero by the end to settle fine detail. The noise schedule picks which noise levels the run trains on. Leave all three alone and your run is byte-for-byte the recipe that shipped before — the defaults did not move. Two settings people ask for are deliberately absent, and the guide says why: on this model EMA would run the pod out of memory at its first checkpoint, and min-SNR weighting would crash the job an hour in, because a flow-matching model has none of the numbers it needs.',
+    to: '/datasets',
+  },
+  {
+    id: '2026-08-04-image-grid-pages-big-datasets',
+    date: '2026-08-04',
+    title: 'A dataset of thousands of images no longer bogs the Images screen down',
+    blurb:
+      'The Images grid used to draw every photo of the dataset at once. On a 6 211-image dataset that is about 148 000 elements on one page — 6 211 thumbnails, 6 211 caption boxes, 60 000 buttons — and it showed: scrolling ran at roughly 20 frames a second on a desktop and 12 on a phone, and a single keystroke in a caption took a tenth of a second to appear. The grid now shows 500 images at a time with a ← Prev / Next → pager above and below it, the same way the Bank has always handled 24 000-image folders. Measured on that same 6 211-image dataset: scrolling back at full speed, typing in a caption instant again, switching a filter about seven times faster. Nothing about curation changed — “select all” still takes every image the current filters show across all pages (its tooltip now says so), a selection you started on one page is still there on the next, the counters, sort, filters and auto-triage all still read the whole dataset, and captions are still edited right on the tile. The pager only appears when there is more than one page.',
+    to: '/datasets?section=images',
+  },
+  {
+    id: '2026-08-04-full-model-lands-on-your-computer',
+    date: '2026-08-04',
+    title: 'A finished full model now lands on YOUR computer — and a full Hugging Face quota can no longer end a training',
+    blurb:
+      '🖥 Until now a full-model (dense) run had exactly one address: a private Hugging Face repository the pod pushed to while it trained. That address has a ceiling nobody controls, and it collected: a run died 250 steps from the end on “403 private repository storage limit reached”, after eight hours of paid GPU, and only survived because 50 GB were deleted by hand. So the order is reversed. The finished model is downloaded to your checkpoint folder FIRST, the ~10 GB fp8 file for ComfyUI with it, and the pod is destroyed only once the file here is proven — the byte count has to match what the pod advertised, and the safetensors header has to re-read. Only then is the master uploaded to Hugging Face as a backup, and that upload is now allowed to fail: it costs the ability to continue that model later, nothing else. Nothing is pushed while the run trains, so the quota can no longer reach the training at all. The transfer is tens of minutes of 26 GB, so it shows its progress, survives an app restart, and can be stopped and resumed without losing what already landed — and if it fails, the machine is kept and the Runs page offers “Fetch to this computer”. A launch also checks this machine’s disk before renting anything, and refuses (confirmably, like every other estimate) when the drive plainly has no room. Choose the delivery in Settings ▸ Storage ▸ Full-model delivery; runs made before today keep their Hugging-Face-only behaviour exactly as it was.',
+    to: '/settings/storage',
+  },
+  {
+    id: '2026-08-04-continue-a-full-model',
+    date: '2026-08-04',
+    title: 'Continue a full model instead of paying for its first 3000 steps again',
+    blurb:
+      '▶ A full-model run that stopped at step 3000 can now be continued to 4000 — the same ▶ Continue as a LoRA, with the same guardrails, cost estimate and “from which step” choice. The fresh machine downloads the checkpoint from the run’s Hugging Face copy itself, over a datacenter link, and training picks up at the step written inside the file. Two honest limits, said in the app rather than discovered: the copy on your computer cannot be used for this (the only channel that puts a file on a pod builds its whole request in memory, which 26 GB cannot survive), so a run delivered to this computer ONLY is not resumable — the default delivery keeps a Hugging Face copy precisely to leave that door open.',
+    to: '/cloud',
+  },
+  {
+    id: '2026-08-04-cloud-quantize-rents-a-machine-that-fits',
+    date: '2026-08-04',
+    title: 'Cloud quantization now rents a machine that can actually hold your model — and says why when it cannot',
+    blurb:
+      '☁ Quantize to fp8 in the cloud used to give up one second after the click with “create_instance failed: HTTP 400 {}” — no machine, no money spent, and no reason. Two things were wrong. It rented the cheapest offer on the market, and cheap is exactly where free disk runs out: a 26 GB model needs about 86 GB on the pod for the master, its fp8 twin and the download cache, while the top offer of a live search had 57 GB — an ask vast refuses outright. And a single refusal ended the job, even though the next machine would have taken it. Now the search only considers machines with the disk this job will claim, the offer is chosen by the same rule a training launch uses (bad hosts skipped, suspiciously cheap listings ignored), and a refusal moves to the next candidate instead of ending everything. When a rental really is impossible, the error quotes what vast said rather than an empty “{}”. The estimate stays an estimate — but if the market moved and the only machine left costs materially more than the price you agreed to, it tells you and rents nothing.',
+  },
+  {
+    id: '2026-08-04-quantize-to-fp8-from-settings-storage',
+    date: '2026-08-04',
+    title: 'Shrink a model to fp8 from Settings ▸ Storage — no dataset, no training run',
+    blurb:
+      'The fp8 quantizer that shipped yesterday had exactly one door: the full-model recipe card, which only exists inside a dense dataset. So the person it was written for — someone who downloaded a 26 GB full-precision model from Hugging Face and cannot load it — had no dataset, and never found it. It is now also in Settings ▸ Storage, beside the folder sizes and the trash, because “this file is too big” is a disk question. It is the same tool, not a second copy: point it at any full-precision .safetensors on this machine and it writes the ~10 GB version ComfyUI loads directly, next to the original. Same refusals before you click (a file that is already quantized, a LoRA/adapter), same promise that your source file is never modified and never overwritten, same read-back of the result before it reports success. It runs on the CPU, one at a time, so it never takes VRAM from ComfyUI or a training run. One correction landed on the same tab: the Hugging Face storage card counts the fp8 export in what a full-model run needs, but did not name it, so a ~60 GB forecast explained itself as 46 GB — the breakdown now lists every term it adds up.',
+    to: '/settings/storage',
+  },
+  {
+    id: '2026-08-04-gallery-lightbox-upscale-improve',
+    date: '2026-08-04',
+    title: 'Upscale & improve is now in the checkpoint gallery — the screen the result lands on',
+    blurb:
+      'Yesterday ✨ Upscale & improve arrived on the ◉ LoRA Canvas lightbox. It was missing from the one place an improvement actually appears: a checkpoint’s gallery. Open any picture from a pill’s 🖼 gallery or from a run card and the button is there, next to ⬇ Download — the same pass, the same choice between Klein (re-renders detail and texture) and SeedVR2 (resolves detail, keeps the look), and the same quote of the instruction Klein is about to send. It is the same action on the same picture as on the board, wired once rather than twice, so the two screens can never start behaving differently. The original is never touched: the improvement arrives as its own image in that very gallery, beside the picture it came from, ready to compare, download or pin onto the board. One honest limit — the pass takes minutes and a gallery left open does not refresh by itself, so close it and open it again to find the new picture waiting at the top.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-04-canvas-drop-keeps-your-view',
+    date: '2026-08-04',
+    title: 'Arranging the canvas no longer throws your framing away',
+    blurb:
+      'Park a render up beside another dataset’s lane, let go — and the whole board zoomed out from under you, because it had just become bigger. Every time you tidied, the canvas re-framed the thing you were tidying, and the further you placed something the harder it kicked. From now on, moving anything — a pinned picture or a run card — means you have taken the view over: the board keeps the zoom and the position you chose and never re-frames itself again. ✦ Fit is still one click away for when you do want the whole board back, which is the difference between an offer and an interruption. A board you have never arranged still opens fitted to your screen, exactly as before.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-krea-edit-takes-an-extra-angle',
+    date: '2026-08-03',
+    title: 'Krea 2 Edit takes a second image — add it in the edit dialog, and use it to compose',
+    blurb:
+      'Editing your reference with Krea 2 Edit used the main photo and nothing else. You can now add a second image, with the “+” inside the ✦ Edit reference dialog. What it is for matters more than the fact it exists: that slot was trained on two-input edits where the second image is a *different* subject — another person, or a scene to place yours in. So it composes (“put her in this room”, “next to him”). Another angle of the same face is off-label there and can come back duplicated, which is why it deliberately does NOT read the dataset’s extra reference photos: those are angles of one person by definition. Extra angles keep doing what they always did, on the engines built for them — Klein chains every one of them from the reference card and locks identity across every generation, and the API engines use them too. Two different jobs, two different places, and the dialog now says which is which before you press Generate.',
+  },
+  {
+    id: '2026-08-03-canvas-images-go-anywhere',
+    date: '2026-08-03',
+    title: 'Pinned images go anywhere on the canvas, not just below and right of their run',
+    blurb:
+      'A picture pinned onto the ◉ LoRA Canvas could be dragged down and right as far as you liked, but never up and never left: its own lane\'s corner was a wall, so you could not park a render above its run, in the free margin beside the board, or next to another dataset\'s lane to compare across datasets. That wall is gone — the mouse and the arrow keys both reach everywhere now, and ✦ Fit grows to include a picture wherever you put it, so it is always one click from being back on screen. Nothing about where an image came from changes: the line to the checkpoint that made it follows it, because that link is read off the image itself rather than off its position. Three things came with it. ✦ Tidy up is the way home — it brings every picture on the board back beside the run that made it, side-by-side strips included, moved in one piece and never taken apart — and it is no longer greyed out on a board where only pictures have been moved, which is exactly when you need it. The board no longer re-zooms under your finger while you drag something past its edge — nor when you let go of it (see the entry above). And a strip of grouped pictures now draws ONE line back to each checkpoint it came from instead of one per picture, so a long link stays readable.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-canvas-group-drag-out-crash',
+    date: '2026-08-03',
+    title: 'Pulling a picture out of a group on the canvas no longer blanks the board',
+    blurb:
+      'Dragging one image off a strip of grouped images showed the error screen instead of the picture coming loose — the board went blank and the only way back was a reload. The hint that appears while you pull ("Drag it off the group to take it out") was reading a size that had moved to another file when the group\'s title bar was split out earlier today, so the very gesture it exists to explain was the one that crashed. It is back, at the same size as the bar\'s own label at every zoom. Nothing you had pinned was lost — the board reloads exactly as you left it.',
+  },
+  {
+    id: '2026-08-03-canvas-lightbox-upscale-improve',
+    date: '2026-08-03',
+    title: 'Upscale a picture without leaving the canvas',
+    blurb:
+      'Open a picture on the ◉ LoRA Canvas and it now carries ✨ Upscale & improve next to ⬇ Download — the same pass, and the same choice between Klein (re-renders detail and texture) and SeedVR2 (resolves detail and keeps the look) you already had in the dataset lightbox, with the same live quote of the instruction Klein is about to send. Until now the only way to improve a render you liked on the board was to go and find it somewhere else. The picture on the board is never touched: the result arrives as its own image in that checkpoint’s gallery, right next to the original, so you can compare the two and pin the better one. SeedVR2 offers to install itself if it is not there yet, an improvement cannot be improved again, and these upscales stay out of the Test Studio — they never count as a run in progress and never enter a checkpoint’s 👍/👎 ranking.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-checkpoint-store-survives-cleanup',
+    date: '2026-08-03',
+    title: 'A cleanup can no longer delete a checkpoint you never deployed',
+    blurb:
+      '“Clean finished runs” said it was trashing “checkpoint duplicates already imported”. For a checkpoint you had never sent to ComfyUI there was no duplicate: the run’s staging folder was its only copy, and emptying the trash destroyed it. Trained files now land in their own checkpoint store the moment they are downloaded, and no cleanup path can reach them — cleaning a run moves its dataset copy, its sample images and its logs, and nothing else. Anything still sitting in an old staging folder is swept into the store at startup, and a button in Settings › Storage re-runs that sweep whenever you want. Two more honest answers while we were there: a run folder nothing points at is now listed with its size instead of being answered “already clean”, and a kept pod stops sparing tens of gigabytes once its recovery window has actually closed.',
+    to: '/settings/storage',
+  },
+  {
+    id: '2026-08-03-settings-storage-tab',
+    date: '2026-08-03',
+    title: 'One tab that says where everything lives — and moves it to another drive',
+    blurb:
+      'When C: fills up, the answer used to be a config.json edit and a manual copy. Settings › Storage now shows every folder the app writes to — datasets, banks, cloud run staging, the checkpoint store, the trash, the archive, the Hugging Face cache — with its real path, what it holds and the free space on its drive. Press 📏 Measure everything to see the sizes (never on open: walking a hundred gigabytes while you read is not a thing a page should do). Three of those roots can be pointed anywhere: type a path, the app proves it can really write there, then you choose out loud — move what is already there, with a progress bar and the old folder removed only once the last byte has landed, or start using the new folder empty and leave the old files exactly where they are. Nothing is ever moved silently. The trash, the run image archive and the Hugging Face allowance moved here too, so the disk questions are answered together instead of one card per screen.',
+    to: '/settings/storage',
+  },
+  {
+    id: '2026-08-03-prompt-batch-no-cap',
+    date: '2026-08-03',
+    title: 'The prompt batch no longer caps at 24 — and the time estimate is now yours',
+    blurb:
+      'Ticking more than 24 saved prompts was refused. That number was a guess, not a limit: nothing breaks past it, and it governed the wrong thing — 24 prompts across eight checkpoints went through, while 25 on a single one did not, even though the second run is far shorter. Tick as many as you like. What you get instead is the real cost, before the click: the panel counts every generation the run will queue and tells you how long that takes at the pace your own machine has actually been running at, measured from your recent tests rather than assumed. Past about an hour it asks once whether you meant it, and reminds you that the queue is serial — you can stop it whenever you like and keep what is already done. Every duration in the Studio and on the canvas now comes from that same measured pace, so a slower card stops being told it will take twenty minutes when it will take two hours.',
+    to: '/studio',
+  },
+  {
+    id: '2026-08-03-full-model-fp8-export-for-comfyui',
+    date: '2026-08-03',
+    title: 'A finished full model now also arrives as a ~10 GB file ComfyUI can just load',
+    blurb:
+      'Full-model training delivers a 26 GB bf16 checkpoint, and nobody generates with a file that size — everyone hunts for a community fp8 repack instead. Now the run makes one itself, on the pod, in the minutes before the machine is released: a scaled fp8 export (~10 GB) pushed next to the master in your private Hugging Face repo, loadable with the standard Load Diffusion Model node, no extra setup. The run card lists both files and says which to download for ComfyUI and which one is the master. “Keep the bf16 master” stays on by default on purpose: fp8 is a one-way export, and the master is the only file you can ever continue, merge or re-quantize from — turning it off halves your storage and closes that door. If the export fails the run is still a success: the master was delivered before it ever ran, and the card says exactly that instead of reporting a failure.',
+    to: '/cloud',
+  },
+  {
+    id: '2026-08-03-quantize-in-the-cloud-without-downloading',
+    date: '2026-08-03',
+    title: 'Quantize a delivered full model in the cloud — you only ever download the small one',
+    blurb:
+      'A full model already sitting in your private Hugging Face repo is 26 GB, and building its fp8 twin at home means pulling all 26 GB down and pushing 10 GB back — an hour of your bandwidth for under a minute of arithmetic. “☁ Quantize to fp8 in the cloud” rents one cheap machine to do that round trip on a datacentre link and writes the fp8 file straight into the same repository; you then download only the ~10 GB result. The cost is quoted before anything is rented — price per hour, estimated minutes, estimated total — like a training run. And the machine is destroyed on every path out: on success, on failure, and at a hard deadline even if it never reported anything, with a sweep that also reaps a machine left behind by an app restart. It refuses if the fp8 file already exists, and warns before renting if your private storage looks too small for it.',
+    to: '/cloud',
+  },
+  {
+    id: '2026-08-03-quantize-an-existing-model-to-fp8',
+    date: '2026-08-03',
+    title: 'Turn any full-precision model you already have into its ~10 GB ComfyUI version',
+    blurb:
+      'The same conversion the cloud runs at the end of a full-model training is now available by hand, on this machine: give it the path to any full-precision .safetensors — a 26 GB model downloaded from Hugging Face, a checkpoint from an earlier run — and it writes the fp8 version next to it. The source file is never modified and an existing output is never silently overwritten. It runs on the CPU, so nothing competes with ComfyUI or a training run, and when it finishes it re-opens the file it wrote to check the scales and dtypes are what ComfyUI expects. It refuses a file that is already quantized, and it refuses a LoRA — neither has anything to gain. Worth saying plainly, because it is constantly confused: this is NOT the “quantize” option in Advanced training, which only shrinks the model in memory while it trains and writes no file at all.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-03-full-model-recipe-unlocked-four-settings',
+    date: '2026-08-03',
+    title: 'The full-model recipe finally lets you change the four things that matter',
+    blurb:
+      'Full-model training only exposed “steps”, so the mid-run preview sheet was four generic prompts that showed nothing about your actual dataset — the one thing you look at while the GPU is billing. Preview prompts are now editable, along with the learning rate (1e-7 to 5e-6), the resolution (768 or 1024) and the checkpoint cadence (every ≥100 steps, keep 1 to 3). Defaults are unchanged, so nothing moves unless you move it. Keeping 3 checkpoints means about 78 GB of private Hugging Face storage, and the panel now says the total before you launch instead of letting the last push fail. Everything still locked — batch size, Adafactor, bf16, gradient checkpointing — now says WHY: it is the geometry that makes a 12B model fit on one 80 GB card, and changing it turns a working run into an out-of-memory crash an hour in.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-03-raw-full-model-test-settings',
+    date: '2026-08-03',
+    title: 'Testing a full model no longer looks like a failed training',
+    blurb:
+      'A full model trained on Krea 2 Raw is an undistilled checkpoint: it needs a real CFG and a real step count. The app was handing it Turbo’s defaults — CFG 1 and 8 steps — which render a blurry sketch and read as “the fine-tune did not work”, when nothing had gone wrong. The Test Studio now pre-fills CFG 4 and 25 steps when the selected base looks like a Raw / full / fp8 checkpoint (the exact settings the run’s own preview sheet used), and the training panel and run card say it in words: test at CFG ~4 and 20-30 steps.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-03-quantized-base-refused-at-selection',
+    date: '2026-08-03',
+    title: 'Picking a quantized checkpoint as a training base is refused before it costs you a run',
+    blurb:
+      'The fp8/int8 exports everyone keeps on disk for generation cannot be trained on — the weights no longer carry the precision a gradient step needs. Until now the app took one happily and the run died deep inside ai-toolkit, after the dataset export and, in the cloud, after a GPU had been rented. Choosing one as Custom weights is now refused the moment you pick it, with a sentence that says what to do: “This is an inference-only quantized export — training needs the bf16/fp16 version of this model.” It reads a few kilobytes of file header, never the 10 GB body, and a header it cannot read is let through rather than guessed at.',
+    to: '/datasets?section=training',
+  },
+  {
+    id: '2026-08-03-person-pass-checks-folders-first',
+    date: '2026-08-03',
+    title: 'The person pass now checks your folders first — and asks once',
+    blurb:
+      'Scraped material arrives one folder per person, and 👥 Group by person used to pay a face embedding per image to rediscover that. The bank could already sample folders and offer the obvious ones, but only from a button in the Subfolder panel — and the first thing anyone does with a new bank is press 🚀 Launch all, so nobody ever saw it. Now the sampling runs by itself the moment you launch the person pass, standalone or inside Launch all: about fifteen images per folder, then one dialog saying “12 folders look like a single person — treat each as one person and skip their full analysis”, with those folders already ticked. One click accepts them all; untick what you disagree with; “👥 Analyze everything anyway” is right there and says what it costs. Folders where the sample showed several faces say so and go to the full analysis, and a ceiling that was not reached is named rather than assumed away. Nothing is ever grouped without your click — and whatever you accept is a normal folder assertion you can undo any time.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-hf-storage-precheck-and-cleanup',
+    date: '2026-08-03',
+    title: 'Full-model cloud runs now check your Hugging Face space before renting a GPU',
+    blurb:
+      'A full-model (dense) Krea run delivers each ~26 GB checkpoint straight into a private Hugging Face repo — and that push happens at the very end. A run died at step 2750 of 3000 on “private repository storage limit reached”, hours of paid GPU gone, because the account\'s private space was full of custom-base caches nothing in the app ever showed you. Now the launch measures your private storage first and refuses before a pod is rented, saying how much is missing and what is taking the room — with Train anyway always available, because Hugging Face publishes no quota endpoint and the ceiling is an estimate. Settings ▸ Training gained a Hugging Face storage card that lists every lds-base-* cache with its size, the local file it mirrors and the run that last used it, and deletes them one by one or all at once — warning you when a cache is the last copy left. And if a run hits the wall anyway, it now says so in plain words and keeps the pod so the checkpoint is recoverable.',
+    to: '/settings/training',
+  },
+  {
+    id: '2026-08-03-seedvr2-tile-and-vae-settings',
+    date: '2026-08-03',
+    title: 'SeedVR2 upscaling now fits smaller cards — tile size is a setting',
+    blurb:
+      'The fidelity upscaler used to hold one 1024 px tile at a time whatever your GPU, which is where a large upscale ran out of memory on an 8 GB card. Settings ▸ Image engines now has a Tile size: lower it to 768 or 512 and the same 4K upscale fits, at the cost of a few more seams. It also sizes the model\'s own tiled encode/decode, so it lowers memory use even without the optional tiling node pack. Two more dials came with it — where automatic tiling switches over, and which VAE file to load when yours is named something the automatic search cannot recognise. Defaults are unchanged, so nothing moves unless you touch it. Thanks to SurpassHR (GitHub) for asking for these knobs alongside the engine itself.',
+    to: '/settings/engines',
+  },
+  {
+    id: '2026-08-03-canvas-usable-on-a-phone',
+    date: '2026-08-03',
+    title: 'The LoRA Canvas is finally usable on a phone',
+    blurb:
+      'The board had never had a small-screen pass, and it showed. Opening 🎨 Generate on a tablet-width window turned it into a fixed side drawer that took more than half the screen and left a sliver of the very board you were picking checkpoints from — so that panel, the run details, the compare view and the image gallery now stay full-width sheets right up to a real desktop, and each one closes with a thumb-sized ✕ instead of a 14-pixel glyph. The zoom, Fit and Tidy up buttons are 40 px on touch, where a miss used to land on the board and pan it. The ✓ box that adds a checkpoint to a run no longer shrinks with the zoom — at the level the board opens on it had become a five-pixel square, on the one control the whole generate flow goes through. And the list of what the board can be told to do, which was simply hidden below laptop width, is now one tap away with the touch gestures spelled out.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-multilora-steps-and-cfg',
+    date: '2026-08-03',
+    title: 'Set the steps and CFG with several LoRAs selected — compare or blend',
+    blurb:
+      'With two or more LoRAs checked, the Test Studio gave you no way to choose the number of steps or the CFG: the setting was not greyed out, it simply was not there, and every image ran on the family default no matter what you wanted. It is there now, in the same panel as the strengths, with the same ladders the single-LoRA studio and the canvas already used — including the SDXL second pass. It stays available in 🧬 Blend, where the strength sweep disappears but the render settings do not, and the cell counter includes them so you can see what a sweep will cost before you launch it.',
+    to: '/studio',
+  },
+  {
+    id: '2026-08-03-studio-prompt-batch',
+    date: '2026-08-03',
+    title: 'Run several saved prompts in one go, on both generation screens',
+    blurb:
+      'The list of saved prompts could only be replayed one at a time: pick a prompt, launch, wait, pick the next one. Every card now has a tick box. Tick three and the launch renders all three with the same checkpoints, the same settings and the same seed — which is what makes them comparable — in a single run the GPU works through by itself. The counter and the button say how many images that is before you click, and ticking nothing leaves the screen exactly as it was. It works the same way in the dataset Test Studio and in "Generate from the board" on the canvas, because both screens show the same list.',
+    to: '/studio',
+  },
+  {
+    id: '2026-08-03-restart-no-longer-kills-a-live-cloud-run',
+    date: '2026-08-03',
+    title: 'Restarting the app no longer kills a cloud run that is training fine',
+    blurb:
+      'When the app restarted, it picked the run back up and asked vast.ai whether the pod still existed. If that one answer came back without the pod in it — which happens, and means nothing — the run was declared dead about ten seconds later, and the "stop" that followed reached the pod that was still training and ended it. A run at step 825 of 3000 was lost that way, with the hour already paid. Now the pod itself is asked: a pod that answers is a pod that exists, whatever the marketplace says, and silence has to last minutes before the run is given up. If it truly cannot be reached, no stop is sent to a machine we could not talk to, and the pod is kept so the result stays recoverable.',
+    to: '/cloud',
+  },
+  {
+    id: '2026-08-03-canvas-opens-again-hotfix',
+    date: '2026-08-03',
+    title: 'The LoRA Canvas opens again — v2026.08.03 broke it for a few minutes',
+    blurb:
+      'If you updated to v2026.08.03 in the short window it was live, the Canvas page crashed on load (“An unexpected error occurred”). The provenance-edges feature read a value before it existed. Fixed — nothing else in that release was affected, and no data was touched.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-canvas-blend-provenance',
+    date: '2026-08-03',
+    title: '🧬 A blended picture now shows every checkpoint it came from',
+    blurb:
+      'A picture pinned on the LoRA Canvas was linked back to one checkpoint — but a 🧬 Blend loads several, often from different datasets, so the board was showing one parent out of two or three. Violet lines now join a blended picture to every source it was made from, across lanes, next to the existing indigo training lineage. When a source is no longer on the board — its run deleted, its dataset unticked — no line is invented: the picture says “1 of 2 sources is not on the board” instead. Blends made before this update keep their images and simply have no lines to show.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-seedvr2-tiling-is-a-choice',
+    date: '2026-08-03',
+    title: 'Tiled upscaling is now the default — it keeps more detail, not just less VRAM',
+    blurb:
+      'Yesterday tiling only kicked in when a frame would not fit on your card. SurpassHR (GitHub #32) re-tested it and sent the source renders: side by side, the full-frame result does not just soften fine texture, it rewrites it — short dense stubble comes back as long smeared strands. A tile is upscaled at the size the model works well at, while a whole 4K frame spreads its capacity over four times the surface. That made the old rule backwards: the bigger your GPU, the less often you got the better picture. So with the tiling node pack installed, large upscales are now tiled by default, and Settings ▸ Image engines lets you choose — tile when it helps (recommended), always tile large frames, or never. Nothing is tiled below roughly 1536 px on the short edge, where the model already works at a good size and a grid would only add seams.',
+    to: '/settings/engines',
+  },
+  {
+    id: '2026-08-03-bank-suggests-one-person-folders',
+    date: '2026-08-03',
+    title: '👤 The bank now spots your one-person folders — suggested automatically, you confirm',
+    blurb:
+      'Telling the bank a subfolder holds a single person saves the whole face pass on it, but you had to know which folders those were. It now samples them and asks: a folder that looks consistent gets a 👤? in the Subfolder picker and offers "Looks like one person (15/15 sampled) — assert?", and a folder holding several people says that too. Nothing is ever grouped on its own — the suggestion is an offer, confirming stays your click, because a wrong grouping made silently is one you would never think to look for. It runs free at the end of 👤 Group by person (the embeddings are already cached, so covering every folder costs no inference), or on demand with 🔎 Scan folders, which tells you what it will cost and what it did not reach. A suggestion expires by itself when the folder gains or loses images.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-medium-runs-itself-after-score',
+    date: '2026-08-03',
+    title: '🎨 Medium classifies itself at the end of ✨ Score',
+    blurb:
+      'Sorting a bank into photo / anime / 3D render / illustration reads the embeddings ✨ Score already computed — no GPU, seconds for 23 000 images. It was still a second button you had to know about, so banks sat there holding the data for the answer without the answer. Score now finishes the job and says so on its own line ("· 🎨 Medium: 812 classified"), or names the reason it could not. The 🎨 Classify medium button stays for re-running it alone, and the automatic pass never re-judges an image that already has a verdict.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-export-keeps-original-bytes',
+    date: '2026-08-03',
+    title: 'Big datasets stop bloating on their way to training',
+    blurb:
+      'Preparing a dataset for training used to re-encode every picture to a lossless PNG, even when nothing needed changing. On a 6 200-image style dataset that turned 3.6 GB of photos into 24 GB and took half an hour before training could even start — long enough to fill a disk and fail with a bare "no space left on device", and long enough that any restart in between killed the run. Pictures the trainer already reads as they are now go through untouched: same dataset, 3.6 GB, a couple of minutes. Anything that genuinely needs converting — a photo with a rotation tag to bake in, an unusual colour mode, a format the trainer does not read — still is. And if the disk really cannot hold the export, you are now told before it starts, with the size it needs and the space you have, instead of finding out halfway through.',
+  },
+  {
+    id: '2026-08-03-canvas-group-bar-reachable',
+    date: '2026-08-03',
+    title: 'Groups of pinned images can be moved and closed again',
+    blurb:
+      'A side-by-side group on the LoRA Canvas could end up impossible to move AND impossible to close, with no way to tell why. Its title bar — which holds the ⠿ grip, Export grid and ✕ — is drawn just above the strip, and any picture pinned over that space silently took the clicks meant for it. The bars are now drawn above every picture, so they always answer; and ✦ Tidy up and 📌 Pin all know that space is taken, so they stop dropping a picture there. It showed up most on a zoomed-out board, where the bar is twice as tall.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-watermark-detector-extra',
+    date: '2026-08-03',
+    title: 'Finding watermarks in a big bank now takes minutes instead of hours',
+    blurb:
+      'Until now, 🚩 Find watermarks asked the vision model, in words, "is there a watermark here?" once per image — about 1.7 seconds each, which is fifteen hours on a 30 000-image bank for a question whose answer is usually no. There is now an optional extra (Setup ▸ Quality tools ▸ Watermark detector) that answers it with a small classifier instead, in about 0.14 seconds, and a second model marks where the logo sits so ✂ Crop and 🧽 Inpaint still have something to work on. It does not need Ollama at all, so a machine with no vision model can scan too. On a hand-labelled sample of 110 images from a real bank it flagged none of the 55 clean ones and 54 of the 55 marked ones — slightly better than the vision model on the same images, which also missed one. Install nothing and nothing changes: the vision model keeps doing exactly the same job, slower. The flag score is tunable in Settings ▸ Captioning & quality.',
+    to: '/setup',
+  },
+  {
+    id: '2026-08-03-canvas-image-controls-see-through',
+    date: '2026-08-03',
+    title: 'Pinned pictures are no longer hidden by their own buttons',
+    blurb:
+      'Hovering a picture pinned on the LoRA Canvas dropped an opaque black band across its top and a black block over its corner — the controls covered the very thing you were pointing at. 🔍, ✕ and ⬇ are now separate rounded pills over a blur, and the step label is a small tag instead of a full-width band, so the image shows through between them. The glyphs went white too: they were mid-grey, which reads on the app’s dark chrome but vanishes on a bright render.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-canvas-filter-opens-folded',
+    date: '2026-08-03',
+    title: 'The LoRA Canvas opens on the board, not on its filter',
+    blurb:
+      'The Datasets filter opened expanded every time you loaded the canvas, and on a library of any size its checkbox list pushed the board itself below the fold — so the first thing you did on the page you came to look at was scroll past a filter. It now opens folded at every width, with the same summary on the button (“3 of 7 · 12 runs shown”), so nothing is hidden. If you unfold it, it stays unfolded next time.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-blend-weight-sweep',
+    date: '2026-08-03',
+    title: '🧬 Tick several weights and blend every combination in one run',
+    blurb:
+      'Finding the right balance between two LoRAs meant launching, looking, moving a slider, launching again. Each LoRA in a 🧬 Blend now has weight boxes next to its slider: tick 0.6 and 0.8 on one, 0.4 and 1.0 on the other, and the launch renders all four combinations in a single run — each image labelled with the pair that made it, and lined up side by side in the stack view so you can just pick. The button says the cost before you commit (“4 weight combinations → 4 images, about 1 min”) and warns past 24, without ever refusing: it is your machine. Tick nothing and the slider governs, exactly as before. Works in the Test Studio and from the LoRA Canvas board.',
+    to: '/studio',
+  },
+  {
+    id: '2026-08-03-concept-sdxl-refusal-tells-the-truth',
+    date: '2026-08-03',
+    title: 'A Concept dataset on SDXL is told the truth instead of sent hunting',
+    blurb:
+      'Concept captions are only ever written as prose, and the prose/booru selector is hidden on concept datasets — so a Concept dataset trained on a booru-native SDXL checkpoint was always stopped, and then told to “re-caption in Booru tags mode”: a control that does not exist for it. You could look for it forever. The refusal now says what is actually true — no booru concept captioner exists yet — and names the two paths that work: train the concept on a prose family (Z-Image, Krea 2, FLUX.1, FLUX.2 Klein, Anima), or force the launch knowing what a booru-native base loses on prose. Character and Style datasets are untouched; both reach booru captions normally.',
+    to: '/datasets?section=training&panel=launch',
+  },
+  {
+    id: '2026-08-03-pinokio-update-hands-back',
+    date: '2026-08-03',
+    title: 'Installed from Pinokio? Updates now tell you the right three clicks',
+    blurb:
+      'Pinokio starts and stops the app itself, so pressing "Update & restart" in Settings would have relaunched the server in a window Pinokio no longer follows — it would show the app as stopped while the old one still held the port, and Start would have opened a second one on the same datasets. The Updates card and the update banner now show Stop, Update, Start instead of that button, while still telling you how many commits behind you are. Every other install shape is unchanged.',
+    to: '/settings/maintenance',
+  },
+  {
+    id: '2026-08-03-seedvr2-tiled-highres',
+    date: '2026-08-03',
+    title: 'Big SeedVR2 upscales no longer have to fit on your card in one piece',
+    blurb:
+      'Upscaling a whole frame at once needs the whole frame in VRAM, and past a certain size that simply fails — with a CUDA out-of-memory error in a log, which is a terrible way to find out. Two things change. The app now tells you, before it starts, roughly how many megapixels your GPU is good for in one pass. And if you install the Comfyui_TTP_Toolset node pack in ComfyUI, anything bigger is automatically cut into overlapping tiles, upscaled tile by tile and blended back together — so a 4K result works on a card that could not hold it whole. Without the pack nothing breaks: upscales still run, they are just capped. Tiled workflow and the measurement behind it contributed by SurpassHR (GitHub #32).',
+    to: '/setup',
+  },
+  {
+    id: '2026-08-03-dataset-passes-survive-a-deleted-image',
+    date: '2026-08-03',
+    title: 'A long pass no longer dies if you delete an image while it is running',
+    blurb:
+      'Captioning, watermark detection and cleaning, framing, short captions — these walk your whole dataset for minutes or hours, and the grid stays clickable the whole time. Delete a bad tile, press ⏹ Stop, or start an improve while one of them is working, and the pass could die on the spot with a cryptic database error, losing the work it had already done on every other image. It now skips whatever disappeared and carries on. ⏹ Stop also reports the number of generations it really cancelled rather than the number it attempted, so the count and the grid can no longer disagree.',
+    to: '/datasets',
+  },
+  {
+    id: '2026-08-03-bank-coverage-sees-more',
+    date: '2026-08-03',
+    title: 'The bank’s Coverage advice can now see that your images all look the same',
+    blurb:
+      'Coverage advice used to read only labels — framing, person and style clusters, resolution — and labels have a blind spot: they cannot tell two hundred near-identical shots from two hundred different ones, and they say nothing about outfits, lighting or camera angle. It now also reads two things you may already have on disk. Visual spread uses the embeddings ✨ Score cached to report how alike the pool actually looks ("91% average similarity — a set this repetitive teaches one look"); the bands come from measuring real banks, where an ordinary one sits near 65% and an image plus its nearest neighbours lands at 79-90%. Caption variety uses the captions 🏷️ wrote to say which camera views, lightings, settings, outfits and expressions your set never mentions — the same reading the dataset Coverage panel does. Both are honest about their limits on the panel itself: without ✨ Score the spread says "Not measured" rather than "varied", and the caption read looks at words rather than pixels, so a profile nobody described is invisible and "not smiling" still counts as a smile. Still advice only — nothing is kept or rejected.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-canvas-blend',
+    date: '2026-08-03',
+    title: '🧬 Blend two LoRAs into one image, straight from the board',
+    blurb:
+      'Ticking several checkpoints on the LoRA Canvas used to mean one pass each. A new ⚖ Compare / 🧬 Blend toggle lets you load them all into the SAME generation instead, each on its own weight slider, with every dataset\'s trigger word listed before you launch rather than injected behind your back. Identity + style and identity + concept are where it pays off — two identities blend into a hybrid person, which the panel now tells you up front. The mode is called Blend everywhere now: the Test Studio\'s 🧬 Combine toggle is the same thing and now says Blend too. Nothing you saved changes — only the word.',
+    to: '/canvas',
+  },
+  {
+    id: '2026-08-03-bank-single-person-folder',
+    date: '2026-08-03',
+    title: '👤 Tell the bank a folder is already one person — and skip the pass',
+    blurb:
+      'Scraped folders are usually one person each, and 👤 Group by person did not know it: one face embedding per image to rediscover what the folder name already said. Scope the grid to a subfolder and click "Single person here" — every image is grouped instantly, with no pass at all, and the next Group by person run skips them entirely. It survives re-scans, adopts images that land in the folder later, and one click undoes it. Not sure? "Check a sample" embeds about fifteen images spread across the folder and tells you whether they look like the same person, at the same threshold the clustering uses — fifteen inferences instead of thousands, and whatever it finds, your call stands.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-caption-mismatch-names-your-family',
+    date: '2026-08-03',
+    title: 'The caption-mismatch warning names YOUR model family, not Z-Image',
+    blurb:
+      'If your captions did not match the family you picked, the app refused the launch with a message that always said “this Z-Image dataset… but Z-Image expects prose” — even when you were training Krea 2, FLUX.1 or FLUX.2 Klein. The sentence was frozen into the code while the truth depends on the family. It now names the one you actually chose, so the advice matches what you are looking at.',
+    to: '/datasets?section=training&panel=launch',
+  },
+  {
+    id: '2026-08-03-anima-hybrid-captions',
+    date: '2026-08-03',
+    title: 'Anima takes booru tags too — the app stops calling them a mistake',
+    blurb:
+      'Anima is a hybrid-prompting model: booru tags and natural language are both first-class on it. The app only knew half of that and treated a booru-captioned Anima dataset as a caption mismatch, so a perfectly valid dataset had to be force-launched past a red warning. Both forms now train without a warning and without forcing, the caption-style selector says so on Anima, and prose stays the preselected default. Every other family keeps its guard exactly as it was — SDXL still refuses prose. Prompted by a correction from Witty_Mycologist_995 (Reddit).',
+    to: '/datasets?section=captions&panel=generate',
+  },
+  {
+    id: '2026-08-03-improve-note-cites-the-setting',
+    date: '2026-08-03',
+    title: 'The amber “drawn dataset” note now names the setting it came from',
+    blurb:
+      'Next to Improve, a caution used to announce “This dataset is drawn.” — a verdict the app never actually reached, because it only ever read the subject type you picked. On a photoreal dataset left marked Anime the sentence was simply wrong, with nothing to tell you where it came from. It now says the subject type is set to anime, so when the setting and your images disagree you can see which one to change. The advice itself is unchanged.',
+    to: '/datasets?section=images&panel=review',
+  },
+  {
+    id: '2026-08-03-folder-picker-paste-a-path',
+    date: '2026-08-03',
+    title: 'You can finally paste a path when choosing a folder',
+    blurb:
+      'Browse… opened the Windows folder tree from the XP era: no address bar, no Quick Access, and no way to paste — so a path someone sent you, or one you had just copied out of Explorer, had to be clicked down to one folder at a time. It now opens the modern Windows folder picker, with an address bar you can paste into and your usual shortcuts down the side. The in-app browser — the one you get over the LAN, on a tablet, or on Linux, where no Windows dialog exists — gained the same thing: a path box at the top, Enter to jump. If the modern dialog cannot be used on your machine, the old one still opens rather than nothing at all.',
+    to: '/datasets',
+  },
+  {
+    id: '2026-08-03-bank-tag-chips',
+    date: '2026-08-03',
+    title: 'Click an image’s 🏷️ tags to find the other images that share them',
+    blurb:
+      'Every captioned tile now has a clickable 🏷️ badge. It opens that image’s caption as chips — woman, red, dress, balcony — and ticking them narrows the grid to the images whose captions mention them. It is the readable cousin of 🎯 Similar to selected: that one matches the overall look and cannot say why, this one matches attributes you picked and shows you exactly which. Several chips mean AND, so each tick narrows further, and chips match as whole words — “car” will not drag back “scarf”.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-bank-medium-chips',
+    date: '2026-08-03',
+    title: '🎨 Split a mixed dump into photos, anime, 3D renders and illustrations',
+    blurb:
+      'A new chip row on the Bank sorts your images by what they are MADE of — a photograph, an anime drawing, a 3D render, a painting — and it costs nothing to run: it reads the embeddings ✨ Score already computed, so no image is looked at twice and the GPU stays free. It is not the same question as 🔎 Origin: a photorealistic AI portrait is 🤖 AI and 📷 Photo at once. Where it cannot tell, it says “Unsure” instead of guessing, and the row prints how big that pile is — measured on a real 23 500-image bank, its photograph verdicts were right 90 out of 90 times, and it refused to call every 3D render it saw rather than invent one. A photo of somebody cosplaying an anime character is the confusion that forced that caution.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-bank-angle-chips',
+    date: '2026-08-03',
+    title: '⤢ Filter a bank by head angle — frontal, three-quarter, profile, from behind',
+    blurb:
+      'The 🎭 Person groups pass has always estimated where a head is pointing, used the number once and thrown it away. It now keeps it, and a new chip row lets you pull out the frontal shots, the three-quarters, the profiles and the back views — the fastest way to see that a set is fifty selfies facing the camera. You can sort by it too. Two limits are printed rather than hidden: profiles are under-counted (a head turned that far often defeats the face detector), and “from behind” needs the 📐 Framing pass as well, because “no face” on its own is also what an empty landscape looks like. Banks scanned before this can measure their missing angles from the row itself — it tells you how many and roughly how long, and does nothing until you click.',
+    to: '/bank',
+  },
+  {
+    id: '2026-08-03-caption-length-preset',
+    date: '2026-08-03',
+    title: 'Ask for shorter — or longer — captions in one click',
+    blurb:
+      'Captions came out at whatever length the vision model felt like, and the only way to steer that was to hand-write it into Extra instructions on every dataset. ⚙️ Options on the Captions panel now has a Caption length dial: Concise aims for one short sentence, Detailed for several, Standard leaves the prompt exactly as it was. On 18 real photos with the shipped default vision model that came out at a median of 24 words for Concise, 88 for Standard and 126 for Detailed — a target the model follows loosely, not a word cap, and your own numbers will differ. Concise stays full prose, so a short-captioned dataset still trains on prose families without forcing past the caption-style check, and it is a different axis from the long + short dual captions — use both if you want. Saved per dataset, offered per run on the image bank\'s caption pass too, and your Extra instructions still get the last word. Suggested by djpraxis (Reddit).',
+    to: '/datasets?section=captions&panel=generate',
+  },
+  {
     id: '2026-08-03-review-opens-instantly',
     date: '2026-08-03',
     title: '▶ Review opens instantly, even on a 20 000-image bank',

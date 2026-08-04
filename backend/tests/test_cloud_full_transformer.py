@@ -110,6 +110,15 @@ def ct(app, monkeypatch):
     monkeypatch.setenv('VAST_API_KEY', 'vast-test')
     monkeypatch.setenv('HF_TOKEN', 'hf-general-must-not-reach-dense')
     monkeypatch.setenv('HF_CLOUD_TOKEN', 'hf-cloud-secret-x')
+    # A dense launch now also measures THIS machine's disk (the delivery lands
+    # here first). The measurement is the only part faked: the forecast, the
+    # refusal and its override all stay live in every test below — a suite whose
+    # verdict depends on how full the developer's C: drive is would be worse
+    # than no test at all.
+    from app.services import storage_locations
+    monkeypatch.setattr(storage_locations, 'free_space',
+                        lambda path: {'free_bytes': 4 * 1000 ** 4,
+                                      'total_bytes': 8 * 1000 ** 4})
     from app.services import cloud_training
     monkeypatch.setattr(cloud_training, '_start_monitor', lambda *a, **k: None)
     monkeypatch.setattr(cloud_training, '_reconcile_before_launch', lambda *a, **k: None)
@@ -186,7 +195,7 @@ def test_full_launch_creates_private_per_run_repo_and_freezes_mode(
     ({'training_mode': 'full_transformer', 'train_type': 'krea',
       'base_model': 'custom.safetensors'}, 'official Krea-2-Raw'),
     ({'training_mode': 'full_transformer', 'train_type': 'krea',
-      'resume_ckpt_path': 'seed.safetensors'}, 'resume/continue'),
+      'resume_ckpt_path': 'seed.safetensors'}, 'copy on this computer'),
 ])
 def test_full_launch_validation_happens_before_reservation(
         ct, app, dataset_id, kwargs, message):
@@ -217,7 +226,140 @@ def test_full_launch_rejects_slider_and_missing_hf_token(
         assert ct.CloudTrainingRun.query.count() == 0
 
 
-def test_full_continue_and_seeded_retry_are_refused(ct, app, dataset_id):
+class _FullAccountHfApi(_FakeHfApi):
+    """The same dense token, on an account whose PRIVATE storage is already
+    full — the state that killed run #146 at step 2750/3000."""
+
+    def list_models(self, author=None, expand=None):
+        repo = SimpleNamespace(id=f'{author}/lds-base-h1111', private=True,
+                               last_modified=None)
+        repo.usedStorage = 95 * 1000 ** 3
+        return [repo]
+
+    def list_datasets(self, author=None, expand=None):
+        return []
+
+
+def _hub_only(monkeypatch):
+    """Force the historical Hugging-Face-only delivery for one test."""
+    from app import config as cfg
+    cloud = dict(cfg.get('cloud') or {})
+    dense = dict(cloud.get('full_transformer') or {})
+    dense['delivery'] = 'hub'
+    cloud['full_transformer'] = dense
+    monkeypatch.setattr(
+        cfg, 'get',
+        lambda key, default=None, _real=cfg.get: (
+            cloud if key == 'cloud' else _real(key, default)))
+
+
+def test_full_launch_refuses_before_renting_when_hf_storage_is_full(
+        ct, app, dataset_id, monkeypatch, tmp_path):
+    """The pre-check has to fire BEFORE the reservation row exists: the point is
+    to lose nothing, and every later refusal has already cost something.
+
+    Scoped to the hub-ONLY delivery, which is the case the refusal is still
+    about: there the repository is the artifact's only address, so a forecast
+    that does not fit means the run has nowhere to land. A delivery that also
+    brings the model home no longer refuses — see the warning test below."""
+    _hub_only(monkeypatch)
+    api = _FullAccountHfApi(tmp_path)
+    monkeypatch.setattr(ct, '_make_hf_api', lambda token: api)
+    with app.app_context():
+        with pytest.raises(ValueError) as excinfo:
+            ct.launch_cloud_training(
+                'local', dataset_id, train_type='krea', variant='base',
+                training_mode='full_transformer')
+        message = str(excinfo.value)
+        assert message.startswith('HF_STORAGE_FULL: ')
+        assert 'lds-base-h1111' in message
+        assert ct.CloudTrainingRun.query.count() == 0
+        assert api.created == []
+
+
+def test_full_launch_warns_instead_of_refusing_when_the_model_comes_home(
+        ct, app, dataset_id, monkeypatch, tmp_path):
+    """A full private quota can no longer end a dense run — only its backup.
+
+    The default delivery downloads the model to this computer FIRST and pushes
+    the master afterwards, so a Hub that will not fit costs resumability, not
+    the run. It is still said BEFORE the GPU is rented: learning that a model
+    cannot be continued is worth eight hours of notice."""
+    api = _FullAccountHfApi(tmp_path)
+    monkeypatch.setattr(ct, '_make_hf_api', lambda token: api)
+    with app.app_context():
+        result = ct.launch_cloud_training(
+            'local', dataset_id, train_type='krea', variant='base',
+            training_mode='full_transformer')
+        run = ct.db.session.get(ct.CloudTrainingRun, result['run_id'])
+        params = json.loads(run.train_params)
+        assert params['dense_delivery'] == 'both'
+        assert 'not be able to continue' in result['warning'] \
+            or 'cannot be continued' in result['warning']
+        assert params['hub_backup_warning'] == result['warning']
+        # The run exists, the repository was created, nothing was refused.
+        assert api.created and params['artifact_status'] == 'pending'
+
+
+def test_full_launch_honours_the_storage_override_and_stamps_it(
+        ct, app, dataset_id, monkeypatch, tmp_path):
+    """The ceiling is an estimate, so 'Train anyway' must exist — and be
+    replayed by an automatic retry rather than re-litigated."""
+    _hub_only(monkeypatch)
+    api = _FullAccountHfApi(tmp_path)
+    monkeypatch.setattr(ct, '_make_hf_api', lambda token: api)
+    with app.app_context():
+        result = ct.launch_cloud_training(
+            'local', dataset_id, train_type='krea', variant='base',
+            training_mode='full_transformer', allow_hf_storage=True)
+        run = ct.db.session.get(ct.CloudTrainingRun, result['run_id'])
+        params = json.loads(run.train_params)
+        assert params['allow_hf_storage'] is True
+        assert ct._confirmation_flags(params)['allow_hf_storage'] is True
+
+
+def test_the_storage_precheck_never_reaches_for_the_general_token(
+        ct, app, dataset_id, monkeypatch, tmp_path):
+    """The pre-check measures with HF_CLOUD_TOKEN and stays blind otherwise.
+
+    Reading the general HF_TOKEN would give a better forecast on a dense token
+    too narrow to list its namespace — and it is deliberately NOT done: dense
+    runs are cut off from that credential, and widening a least-privilege
+    boundary to sharpen an estimate is the wrong trade. Pinned here so the
+    blind spot stays a decision rather than becoming a regression."""
+    dense = _FakeHfApi(tmp_path)                     # no list_models at all
+    general = _FullAccountHfApi(tmp_path)            # would have said "full"
+    monkeypatch.setattr(
+        ct, '_make_hf_api',
+        lambda token: general if token == 'hf-general-must-not-reach-dense' else dense)
+    with app.app_context():
+        result = ct.launch_cloud_training(
+            'local', dataset_id, train_type='krea', variant='base',
+            training_mode='full_transformer')
+        assert result['run_id']
+
+
+def test_full_launch_is_not_blocked_by_an_unmeasurable_account(
+        ct, app, dataset_id, monkeypatch, tmp_path):
+    """_FakeHfApi has no list_models at all — the Hub could not be measured, and
+    an unmeasurable number must never lock a user out of their own GPU."""
+    api = _FakeHfApi(tmp_path)
+    monkeypatch.setattr(ct, '_make_hf_api', lambda token: api)
+    with app.app_context():
+        result = ct.launch_cloud_training(
+            'local', dataset_id, train_type='krea', variant='base',
+            training_mode='full_transformer')
+        assert result['run_id']
+
+
+def test_dense_continue_needs_a_hub_copy_and_never_a_local_seed(
+        ct, app, dataset_id):
+    """Continuing a full model is supported — from the Hub, and only from it.
+
+    A dense master is ~26 GB and the only seam that puts a file on a pod builds
+    its whole request in memory, so a local seed is refused with the reason and
+    the fix. A run with no verified Hub copy has no source at all, and says so
+    rather than pretending the option exists."""
     with app.app_context():
         done = ct.CloudTrainingRun(
             dataset_id=dataset_id, status='done', run_name='dense',
@@ -230,11 +372,11 @@ def test_full_continue_and_seeded_retry_are_refused(ct, app, dataset_id):
                 'variant': 'base', 'resume_ckpt_path': 'seed.safetensors'}))
         ct.db.session.add_all([done, retry])
         ct.db.session.commit()
-        with pytest.raises(ValueError, match='cannot be continued or resumed'):
+        with pytest.raises(ValueError, match='no Hugging Face copy'):
             ct.continue_cloud_run('local', done.id)
-        with pytest.raises(ValueError, match='resume/continue'):
+        with pytest.raises(ValueError, match='local file'):
             ct.retry_cloud_run('local', retry.id)
-        with pytest.raises(ValueError, match='cannot be continued or resumed'):
+        with pytest.raises(ValueError, match='cannot be sent to a pod'):
             ct.continue_local_run_in_cloud(
                 'local', dataset_id, training_mode='full_transformer')
 

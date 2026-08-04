@@ -12,6 +12,7 @@ import {
 } from './dualCaptions.js';
 import { maskedCarryOverAction, clearLegacyMasked } from './maskedMigration.js';
 import ConceptFaceMaskField from './ConceptFaceMaskField';
+import Fp8QuantizeTool from './Fp8QuantizeTool';
 import {
   checkpointSelectionMatchesTraining,
   checkpointVariantLabel,
@@ -71,7 +72,10 @@ import {
   TRAINING_MODE_FULL_TRANSFORMER,
   TRAINING_MODE_LORA,
   cloudTierEstimateView,
+  denseQuantizeTarget,
+  fullTransformerArtifactFiles,
   fullTransformerArtifactView,
+  fullTransformerFp8Note,
   fullTransformerUnavailableReason,
   hfCloudTokenReadiness,
   isFullTransformerEligible,
@@ -147,6 +151,9 @@ const FULL_ARTIFACT_TONE = {
 
 function FullTransformerArtifactNotice({ run }) {
   const view = fullTransformerArtifactView(run);
+  const files = fullTransformerArtifactFiles(run);
+  const fp8Note = fullTransformerFp8Note(run);
+  const hint = run?.inference_hint || null;
   return (
     <div role={view.tone === 'error' || view.tone === 'warning' ? 'alert' : 'status'}
       className={`w-fit max-w-full rounded-lg border px-3 py-2 text-[0.6875rem] leading-relaxed ${FULL_ARTIFACT_TONE[view.tone]}`}>
@@ -157,6 +164,29 @@ function FullTransformerArtifactNotice({ run }) {
           className="mt-1 inline-block font-semibold text-sky-200 underline hover:text-sky-100">
           Open private model on Hugging Face ↗
         </a>
+      )}
+      {files.length > 0 && (
+        <ul className="mt-1.5 m-0 list-none p-0 flex flex-col gap-1">
+          {files.map((file) => (
+            <li key={file.kind}
+              className={`rounded border px-2 py-1 ${file.primary
+                ? 'border-emerald-300/45 bg-emerald-400/10' : 'border-white/15 bg-black/15'}`}>
+              <span className="font-mono break-all">{file.name}</span>
+              {file.sizeBytes ? <span className="opacity-80"> · {fmtBytes(file.sizeBytes)}</span> : null}
+              <span className="block opacity-85">{file.note}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {fp8Note && (
+        <p className="m-0 mt-1 opacity-85">ℹ {fp8Note}</p>
+      )}
+      {/* No button here on purpose. The conversion has ONE surface — the recipe
+          card's "Quantize a model to fp8" block, which now targets this very
+          model on its own. Two doors doing the same thing on the same screen is
+          what the cloud button already was. */}
+      {view.available && hint?.note && (
+        <p className="m-0 mt-1 opacity-90">⚠ {hint.note}</p>
       )}
       {!view.href && view.repositoryHref && (
         <a href={view.repositoryHref} target="_blank" rel="noreferrer"
@@ -170,20 +200,135 @@ function FullTransformerArtifactNotice({ run }) {
 }
 
 // FULL_TRANSFORMER_ADVANCED_RECIPE_START
-/** The dense Krea recipe is intentionally server-owned. Keep this surface
- * read-only except for `steps`, the sole advanced value carried through offers,
- * preflight, launch and the final ai-toolkit job config. */
-function FullTransformerAdvancedRecipe({ stepsOverride, setStepsOverride, disabled = false }) {
+/** The dense Krea recipe stays server-owned, but not all of it is a constraint.
+ *
+ * The values that changed the OUTPUT rather than whether the run fits in 80 GB
+ * are editable here: preview prompts (the generic defaults showed nothing about
+ * the actual dataset), learning rate, resolution, the checkpoint-every / keep
+ * pair — which is also what the Hugging Face storage forecast multiplies, so it
+ * states the delivery size right next to the control — and the three quality
+ * levers (images per step, learning-rate schedule, noise schedule).
+ *
+ * "Images per step" is gradient accumulation in the user's words. It is the only
+ * lever here whose cost is money rather than memory, so the multiplier it
+ * implies is printed next to it and turns amber once it is above 1: a rented
+ * 80 GB GPU is billed by the hour, and nobody should learn that from an invoice.
+ *
+ * Everything else is locked and SAYS SO: optimizer, batch size, dtype and
+ * gradient checkpointing are the geometry that makes a 12B transformer trainable
+ * on one 80 GB card. Changing any of them turns a working run into an
+ * out-of-memory crash an hour in, on a rented GPU.
+ */
+const DENSE_BOUNDS_FALLBACK = {
+  lr: 1e-6, lrMin: 1e-7, lrMax: 5e-6,
+  resolution: 1024, resolutionChoices: [768, 1024],
+  saveEvery: 250, saveEveryMin: 100, saveEveryMax: 5000,
+  keeps: 1, keepsMax: 3,
+  gradAccum: 1, gradAccumChoices: [1, 2, 4, 8],
+  lrSchedule: 'constant',
+  lrScheduleChoices: ['constant', 'constant_with_warmup', 'cosine'],
+  warmup: 100, warmupMin: 10, warmupMax: 1000,
+  timestepType: 'linear', timestepTypeChoices: ['linear', 'sigmoid', 'weighted'],
+};
+
+// User-facing wording for ai-toolkit's own value names. The STORED value stays
+// ai-toolkit's (no alias to maintain, cf. CLAUDE.md rule 7) — only the label is
+// translated, and each one says what it does rather than what it is called.
+const DENSE_LR_SCHEDULE_LABELS = {
+  constant: 'Constant (default)',
+  constant_with_warmup: 'Warm up, then constant',
+  cosine: 'Cosine decay to zero',
+};
+const DENSE_TIMESTEP_LABELS = {
+  linear: 'Linear (default)',
+  sigmoid: 'Sigmoid — favours mid noise levels',
+  weighted: 'Weighted — same draw, bell-curve loss weighting',
+};
+
+const fmtGB = (bytes) => (
+  typeof bytes === 'number' && bytes > 0 ? `${(bytes / 1e9).toFixed(1)} GB` : null
+);
+
+// Exported for the render contract test. Nothing else imports it: a settings
+// card whose JSX is never executed by a test is a card that can ship with a
+// crash in it, and source-text assertions do not execute anything.
+export function FullTransformerAdvancedRecipe({
+  stepsOverride, setStepsOverride, disabled = false,
+  adv = null, saveAdv = null,
+  samplePromptsText = '', setSamplePromptsText = null, saveSamplePrompts = null,
+  samplePromptsDefault = [], maxSamplePrompts = 8,
+  quantizeTarget = null, suggestedQuantizePath = '',
+}) {
   const explicitSteps = String(stepsOverride || '').trim();
   const factClass = 'rounded-lg border border-sky-400/20 bg-app/45 px-2.5 py-2';
+  const b = DENSE_BOUNDS_FALLBACK;
+  const lr = adv?.dense_lr ?? b.lr;
+  const lrMin = adv?.dense_lr_min ?? b.lrMin;
+  const lrMax = adv?.dense_lr_max ?? b.lrMax;
+  const resolution = adv?.dense_resolution ?? b.resolution;
+  const resolutionChoices = adv?.dense_resolution_choices ?? b.resolutionChoices;
+  const saveEvery = adv?.dense_save_every ?? b.saveEvery;
+  const saveEveryMin = adv?.dense_save_every_min ?? b.saveEveryMin;
+  const saveEveryMax = adv?.dense_save_every_max ?? b.saveEveryMax;
+  const keeps = adv?.dense_max_step_saves ?? b.keeps;
+  const keepsMax = adv?.dense_max_step_saves_max ?? b.keepsMax;
+  const plan = adv?.dense_storage_plan || null;
+  const hint = adv?.dense_inference_hint || null;
+  const fp8 = adv?.dense_fp8_export !== false;
+  const keepMaster = adv?.dense_keep_bf16 !== false;
+  const gradAccum = adv?.dense_grad_accum ?? b.gradAccum;
+  const gradAccumChoices = adv?.dense_grad_accum_choices ?? b.gradAccumChoices;
+  const timeMultiplier = adv?.dense_time_multiplier ?? gradAccum;
+  const lrSchedule = adv?.dense_lr_schedule ?? b.lrSchedule;
+  const lrScheduleChoices = adv?.dense_lr_schedule_choices ?? b.lrScheduleChoices;
+  const warmup = adv?.dense_warmup ?? b.warmup;
+  const warmupMin = adv?.dense_warmup_min ?? b.warmupMin;
+  const warmupMax = adv?.dense_warmup_max ?? b.warmupMax;
+  const warmupApplies = adv?.dense_warmup_applies ?? (lrSchedule === 'constant_with_warmup');
+  const timestepType = adv?.dense_timestep_type ?? b.timestepType;
+  const timestepTypeChoices = adv?.dense_timestep_type_choices ?? b.timestepTypeChoices;
+  const [lrDraft, setLrDraft] = useState(String(lr));
+  const [saveDraft, setSaveDraft] = useState(String(saveEvery));
+  const [warmupDraft, setWarmupDraft] = useState(String(warmup));
+  useEffect(() => { setLrDraft(String(lr)); }, [lr]);
+  useEffect(() => { setSaveDraft(String(saveEvery)); }, [saveEvery]);
+  useEffect(() => { setWarmupDraft(String(warmup)); }, [warmup]);
+  const patch = (values) => { if (saveAdv) saveAdv(values); };
+  const commitLr = () => {
+    const value = Number(lrDraft);
+    if (!Number.isFinite(value) || value < lrMin || value > lrMax) {
+      setLrDraft(String(lr));
+      return;
+    }
+    if (value !== lr) patch({ dense_lr: value });
+  };
+  const commitSaveEvery = () => {
+    const value = Number(saveDraft);
+    if (!Number.isInteger(value) || value < saveEveryMin || value > saveEveryMax) {
+      setSaveDraft(String(saveEvery));
+      return;
+    }
+    if (value !== saveEvery) patch({ dense_save_every: value });
+  };
+  const commitWarmup = () => {
+    const value = Number(warmupDraft);
+    if (!Number.isInteger(value) || value < warmupMin || value > warmupMax) {
+      setWarmupDraft(String(warmup));
+      return;
+    }
+    if (value !== warmup) patch({ dense_warmup: value });
+  };
+  const controlClass = 'rounded border border-sky-300/40 bg-app/70 px-2 py-1 text-content tabular-nums disabled:opacity-50';
+
   return (
-    <section aria-label="Locked Krea 2 full-model recipe"
+    <section aria-label="Krea 2 full-model recipe"
       className="rounded-xl border border-sky-400/35 bg-sky-500/[0.07] p-3 text-[0.75rem]">
       <div className="flex flex-col gap-1">
         <span className="font-semibold text-sky-100">Recipe sent to AI Toolkit</span>
         <span className="text-sky-200/85 leading-relaxed">
-          The server locks these values for full-model training. LoRA/LoKr presets and settings
-          are not shown or applied.
+          The values below the line are yours to change. The ones above are locked because they
+          are what makes a 12B transformer fit on one 80 GB card — LoRA/LoKr presets and settings
+          are not shown or applied here.
         </span>
       </div>
 
@@ -193,42 +338,223 @@ function FullTransformerAdvancedRecipe({ stepsOverride, setStepsOverride, disabl
           <dd className="m-0 mt-0.5 text-content">Official Krea 2 Raw · full transformer · unquantized</dd>
         </div>
         <div className={factClass}>
-          <dt className="text-content-subtle text-[0.625rem] uppercase">Compute</dt>
-          <dd className="m-0 mt-0.5 text-content">1024 px · batch 1 · bf16</dd>
+          <dt className="text-content-subtle text-[0.625rem] uppercase">Locked · batch &amp; precision</dt>
+          <dd className="m-0 mt-0.5 text-content">Batch 1 · bf16 — the 80 GB budget has no room for more</dd>
         </div>
         <div className={factClass}>
-          <dt className="text-content-subtle text-[0.625rem] uppercase">Optimization</dt>
-          <dd className="m-0 mt-0.5 text-content">Adafactor · learning rate 1e-6</dd>
+          <dt className="text-content-subtle text-[0.625rem] uppercase">Locked · optimizer</dt>
+          <dd className="m-0 mt-0.5 text-content">Adafactor — Adam-family states would not fit in memory</dd>
         </div>
         <div className={factClass}>
-          <dt className="text-content-subtle text-[0.625rem] uppercase">Memory</dt>
+          <dt className="text-content-subtle text-[0.625rem] uppercase">Locked · memory</dt>
           <dd className="m-0 mt-0.5 text-content">Gradient checkpointing · cached latents + text embeddings</dd>
-        </div>
-        <div className={factClass}>
-          <dt className="text-content-subtle text-[0.625rem] uppercase">Checkpoints</dt>
-          <dd className="m-0 mt-0.5 text-content">Checkpoint + preview every 250 steps · keep 1 checkpoint</dd>
         </div>
         <div className={factClass}>
           <dt className="text-content-subtle text-[0.625rem] uppercase">Cloud requirements</dt>
           <dd className="m-0 mt-0.5 text-content">80 GB VRAM GPU · at least 200 GB disk</dd>
         </div>
+        <div className={factClass}>
+          <dt className="text-content-subtle text-[0.625rem] uppercase">Delivery</dt>
+          <dd className="m-0 mt-0.5 text-content">
+            {fp8
+              ? (keepMaster
+                ? 'Private Hugging Face repo · bf16 master + fp8 export for ComfyUI'
+                : 'Private Hugging Face repo · fp8 export only (no re-training later)')
+              : 'Private Hugging Face repo · bf16 master only'}
+          </dd>
+        </div>
       </dl>
 
-      <label className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
-        <span className="font-semibold">Steps</span>
-        <input type="number" min={500} step={100} value={stepsOverride}
-          onChange={(event) => setStepsOverride(event.target.value)}
-          disabled={disabled}
-          placeholder="adaptive"
-          aria-label="Full-model training steps (leave empty for an adaptive target)"
-          className="w-[6rem] rounded border border-sky-300/40 bg-app/70 px-2 py-1 text-content tabular-nums disabled:opacity-50" />
-        <span className="text-sky-100/80">
-          {explicitSteps ? `${explicitSteps} target steps` : 'empty = server-calculated adaptive target'}
-        </span>
-        <span className="basis-full text-sky-200/70 text-[0.6875rem]">
-          The only editable setting in this full-model recipe.
-        </span>
-      </label>
+      {hint?.note && (
+        <p className="m-0 mt-3 rounded-lg border border-amber-300/35 bg-amber-400/10 px-2.5 py-2 text-amber-100 leading-relaxed">
+          ⚠ {hint.note}
+        </p>
+      )}
+
+      <div className="mt-3 border-t border-sky-300/25 pt-3 flex flex-col gap-2">
+        <span className="font-semibold text-sky-100">Editable</span>
+
+        <label className="flex flex-wrap items-center gap-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <span className="font-semibold">Steps</span>
+          <input type="number" min={500} step={100} value={stepsOverride}
+            onChange={(event) => setStepsOverride(event.target.value)}
+            disabled={disabled}
+            placeholder="adaptive"
+            aria-label="Full-model training steps (leave empty for an adaptive target)"
+            className={`w-[6rem] ${controlClass}`} />
+          <span className="text-sky-100/80">
+            {explicitSteps ? `${explicitSteps} target steps` : 'empty = server-calculated adaptive target'}
+          </span>
+        </label>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Learning rate</span>
+            <input type="number" step="1e-7" min={lrMin} max={lrMax} value={lrDraft}
+              onChange={(event) => setLrDraft(event.target.value)}
+              onBlur={commitLr} disabled={disabled}
+              aria-label="Full-model learning rate"
+              className={`w-[7rem] ${controlClass}`} />
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Resolution</span>
+            <select value={String(resolution)} disabled={disabled}
+              onChange={(event) => patch({ dense_resolution: Number(event.target.value) })}
+              aria-label="Full-model training resolution"
+              className={controlClass}>
+              {resolutionChoices.map((value) => (
+                <option key={value} value={String(value)}>{value} px</option>
+              ))}
+            </select>
+          </label>
+          <span className="basis-full text-sky-200/70 text-[0.6875rem]">
+            {lrMin.toExponential(0)}–{lrMax.toExponential(0)} · default 1e-6. 768 px trains faster
+            and cheaper than the 1024 px default, at lower fidelity.
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Images per step</span>
+            <select value={String(gradAccum)} disabled={disabled}
+              onChange={(event) => patch({ dense_grad_accum: Number(event.target.value) })}
+              aria-label="How many images each optimizer step learns from"
+              className={controlClass}>
+              {gradAccumChoices.map((value) => (
+                <option key={value} value={String(value)}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Noise schedule</span>
+            <select value={timestepType} disabled={disabled}
+              onChange={(event) => patch({ dense_timestep_type: event.target.value })}
+              aria-label="Full-model timestep distribution"
+              className={controlClass}>
+              {timestepTypeChoices.map((value) => (
+                <option key={value} value={value}>
+                  {DENSE_TIMESTEP_LABELS[value] || value}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* The bill, next to the control that sets it. Gradient accumulation
+              is the one lever here that buys quality with money rather than
+              memory, and a rented GPU is billed by the hour. */}
+          <span className={`basis-full text-[0.6875rem] ${
+            timeMultiplier > 1 ? 'text-amber-100/90' : 'text-sky-200/70'}`}>
+            {timeMultiplier > 1
+              ? `Each step learns from ${gradAccum} images instead of 1 — steadier training on a `
+                + `big dataset, but the run takes about ${timeMultiplier}× as long, so the rented `
+                + `GPU costs about ${timeMultiplier}× as much. Same checkpoints, same storage.`
+              : 'One image per step is the default. Raising it averages several images into each '
+                + 'update — steadier on a large dataset, but it multiplies the run time and the '
+                + 'pod bill by the same number.'}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Learning-rate schedule</span>
+            <select value={lrSchedule} disabled={disabled}
+              onChange={(event) => patch({ dense_lr_schedule: event.target.value })}
+              aria-label="Full-model learning-rate schedule"
+              className={controlClass}>
+              {lrScheduleChoices.map((value) => (
+                <option key={value} value={value}>
+                  {DENSE_LR_SCHEDULE_LABELS[value] || value}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* Warmup steps only reach the trainer on the one schedule that
+              accepts them; the server gates it the same way. */}
+          {warmupApplies && (
+            <label className="flex items-center gap-2">
+              <span className="font-semibold">Warm up over</span>
+              <input type="number" min={warmupMin} max={warmupMax} step={10} value={warmupDraft}
+                onChange={(event) => setWarmupDraft(event.target.value)}
+                onBlur={commitWarmup} disabled={disabled}
+                aria-label="Full-model warmup length in steps"
+                className={`w-[5.5rem] ${controlClass}`} />
+              <span className="text-sky-100/80">steps</span>
+            </label>
+          )}
+          <span className="basis-full text-sky-200/70 text-[0.6875rem]">
+            Constant is what shipped. Warming up eases the first steps instead of hitting a 12B
+            model at full rate from step 1; cosine decay fades the rate to zero by the last step,
+            which settles detail late in the run. Neither changes what the run delivers or costs.
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Checkpoint every</span>
+            <input type="number" min={saveEveryMin} max={saveEveryMax} step={50} value={saveDraft}
+              onChange={(event) => setSaveDraft(event.target.value)}
+              onBlur={commitSaveEvery} disabled={disabled}
+              aria-label="Full-model checkpoint interval in steps"
+              className={`w-[6rem] ${controlClass}`} />
+            <span className="text-sky-100/80">steps</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="font-semibold">Keep</span>
+            <select value={String(keeps)} disabled={disabled}
+              onChange={(event) => patch({ dense_max_step_saves: Number(event.target.value) })}
+              aria-label="How many full-model checkpoints to keep"
+              className={controlClass}>
+              {Array.from({ length: keepsMax }, (_, i) => i + 1).map((value) => (
+                <option key={value} value={String(value)}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <span className="basis-full text-amber-100/90 text-[0.6875rem]">
+            {plan
+              ? `Each checkpoint is about ${fmtGB(plan.checkpoint_bytes) || '26 GB'}${
+                plan.fp8_typical_bytes ? `, plus a ~${fmtGB(plan.fp8_typical_bytes)} fp8 export` : ''
+              } — this run will need about ${fmtGB(plan.peak_bytes) || '26 GB'} of PRIVATE Hugging Face storage.`
+              : 'Each checkpoint is about 26 GB of private Hugging Face storage.'}
+          </span>
+        </div>
+
+        <div className="rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <label className="flex flex-col gap-1">
+            <span className="font-semibold">Preview prompts</span>
+            <textarea rows={4} value={samplePromptsText} disabled={disabled}
+              onChange={(event) => setSamplePromptsText?.(event.target.value)}
+              onBlur={() => saveSamplePrompts?.()}
+              placeholder={samplePromptsDefault.join('\n')}
+              aria-label="Full-model preview prompts, one per line"
+              className="w-full min-w-0 rounded border border-sky-300/40 bg-app/70 px-2 py-1 text-content text-[0.75rem] font-mono disabled:opacity-50" />
+          </label>
+          <p className="m-0 mt-1 text-sky-200/70 text-[0.6875rem]">
+            One per line, up to {maxSamplePrompts}. Empty = the generic defaults, which show nothing
+            about this dataset — these images are the only way to judge the run while it costs money.
+            Use <code>{'{trigger}'}</code> where the subject belongs.
+          </p>
+        </div>
+
+        <label className="flex flex-wrap items-center gap-2 rounded-lg border border-sky-300/30 bg-sky-400/10 px-3 py-2 text-sky-50">
+          <input type="checkbox" checked={keepMaster} disabled={disabled || !fp8}
+            onChange={(event) => patch({ dense_keep_bf16: event.target.checked })}
+            className="accent-sky-400" />
+          <span className="font-semibold">Keep the bf16 master next to the fp8 export</span>
+          <span className="basis-full text-sky-200/70 text-[0.6875rem]">
+            fp8 is a one-way, inference-only export: without the master this model can never be
+            continued, re-trained or merged. Turning this off halves the storage and closes that door.
+          </span>
+        </label>
+
+        {/* THE surface for the conversion. `target` is what turns it from "paste
+            a path" into one click: the model this dataset's run delivered, named
+            by the same `hf_weight_filename` the artifact card above lists — so
+            the card and the operation can never designate different checkpoints
+            out of a repository that holds several 26 GB files. `suggestedPath`
+            pre-fills the manual field with the custom base already on screen,
+            when there is one. */}
+        <Fp8QuantizeTool disabled={disabled} target={quantizeTarget}
+          suggestedPath={suggestedQuantizePath} />
+      </div>
     </section>
   );
 }
@@ -1995,7 +2321,7 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
         <select value={trainType} onChange={(e) => onTypeChange(e.target.value)}
           disabled={trainTypeBusy || presetBusy || trainingModeBusy}
           aria-label="Training model family"
-          title="Z-Image (prose, Qwen3 encoder) ~20 img · SDXL (ComfyUI checkpoints) ~30 img · Krea 2 (prose, base fixe Turbo) ~20 img · FLUX.1-dev (prose, gated HF, local-only) ~20 img · FLUX.2 Klein (prose, gated HF, 4B local / 9B cloud) ~20 img · Anima (prose, Qwen3 encoder, anime, public base, local-only) ~20 img"
+          title="Z-Image (prose, Qwen3 encoder) ~20 img · SDXL (ComfyUI checkpoints) ~30 img · Krea 2 (prose, base fixe Turbo) ~20 img · FLUX.1-dev (prose, gated HF, local-only) ~20 img · FLUX.2 Klein (prose, gated HF, 4B local / 9B cloud) ~20 img · Anima (prose OR booru tags — both native, Qwen LLM encoder, anime, public base, local-only) ~20 img"
           className="px-2 py-1 rounded-lg border border-border bg-surface text-content text-[0.75rem] disabled:opacity-50">
           <option value="zimage">Z-Image (~20 img)</option>
           <option value="sdxl">SDXL (~30 img)</option>
@@ -2337,9 +2663,9 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
           className="cursor-pointer select-none px-3 py-2 text-sm text-content font-semibold">
           {fullMode ? (
             <>
-              ⚙️ Locked full-model recipe · steps
+              ⚙️ Full-model recipe · steps · prompts · LR · resolution · checkpoints
               <span className="ml-2 font-normal text-sky-200/80 text-[0.6875rem]">
-                Krea 2 Raw · 1024 · cloud
+                Krea 2 Raw · cloud
               </span>
             </>
           ) : (
@@ -2358,6 +2684,14 @@ export default function TrainingPanel({ ds, keptCount, kind, onCheckpointsChange
             <FullTransformerAdvancedRecipe
               stepsOverride={stepsOverride}
               setStepsOverride={setStepsOverride}
+              adv={adv} saveAdv={saveAdv}
+              samplePromptsText={samplePromptsText}
+              setSamplePromptsText={setSamplePromptsText}
+              saveSamplePrompts={saveSamplePrompts}
+              samplePromptsDefault={advSampleDefault}
+              maxSamplePrompts={advMaxPrompts}
+              quantizeTarget={denseQuantizeTarget(cloudLastHere || {})}
+              suggestedQuantizePath={looksAbsolute(base) ? String(base).trim() : ''}
               disabled={trainingModeBusy || cloudActiveHere} />
           ) : (<>
           {/* LORA_ADVANCED_CONTROLS_START */}

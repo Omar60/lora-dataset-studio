@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch, postJson } from '../../api/fetchClient'
+import { apiFetch, del, postJson } from '../../api/fetchClient'
 import { useToast } from '../common/Toast'
 import { useCapabilities } from '../../context/CapabilitiesContext'
 import { useConnectionStatus } from '../../hooks/useConnectionStatus'
@@ -13,9 +13,19 @@ import FolderSyncNote from './FolderSyncNote'
 import RelocateBankDialog from './RelocateBankDialog'
 import BankReviewLightbox from './BankReviewLightbox'
 import BankWatermarkPanel from './BankWatermarkPanel'
+// 👤 "Single person here" — a folder the user declares to hold one person.
+import SubfolderPersonPanel from './SubfolderPersonPanel'
+import { assertionFor, folderMarker, scanOffer, suggestionFor } from './folderPerson.js'
+import PersonPreflightDialog from './PersonPreflightDialog'
+import { preflightNeeded, preflightWillSample } from './personPreflight.js'
 // 🎚 The twelve triage thresholds, edited here instead of in Settings.
 import BankThresholdsPanel from './BankThresholdsPanel.jsx'
 // Source-folder re-walk messages (pure/testable).
+import { spreadReadout, spreadCoverageNote } from './coverageVisual.js'
+// Shared with the dataset coverage panel on purpose: both render the SAME
+// caption-lexicon payload, so the row/summary logic lives in one place rather
+// than being copied and left to drift.
+import { axisRows, axisSummary } from '../dataset/datasetCoverage.js'
 import { folderSyncToast } from './bankSync.js'
 import { UNDO_HINT, undoBannerText, undoOffer, undoResultMessage } from './bankUndo.js'
 // Four progress states, not two — including the honest "I don't know" (pure/testable).
@@ -26,13 +36,15 @@ import { holdsTheGpu, scoreDeviceNote } from './bankScoreDevice.js'
 // Wording that adapts to the machine (a card-less box is never sold CUDA).
 import { openerLabel } from './scoringPython.js'
 // Reuse the dataset's register list so the Bank lane never drifts from it.
-import { VOCABULARY_OPTIONS } from '../dataset/CaptionOptionsPopover'
+import { CAPTION_LENGTH_OPTIONS, VOCABULARY_OPTIONS } from '../dataset/CaptionOptionsPopover'
 // Ordered zone model + the "what's next" accent, both pure/testable.
 import { BANK_ZONES, nextBankStep } from './bankGuide.js'
 // Provenance wording (effective resolution, origin, black bars) — pure/testable.
 import { ORIGIN_CHIPS, PROVENANCE_FLAG_LABEL, detailSummary } from './bankProvenance.js'
 // Grid ordering menu (which sorts exist, and which ones have data) — pure/testable.
 import { bankSortGroups, loadBankSort, saveBankSort } from '../../utils/gridSort.js'
+// 🏷️ One image's caption → the chips you can filter by (pure/testable).
+import { captionChips, tagsParam, tagFilterSummary } from './bankTags.js'
 // 🔤 Text search wording — "closest", never "matching" — plus the cold-start and
 // CLIP-limitation copy. Pure/testable (node --test cannot parse this JSX).
 import {
@@ -46,6 +58,13 @@ import {
   BALANCE_AXES, BALANCE_DEFAULT_AXIS, balanceNotes, balanceReadiness,
   balanceRows, summarizeBalance,
 } from './bankBalance.js'
+// 🎨 Medium + ⤢ Angle — buckets, tooltips and, above all, the LIMITS each row
+// has to print. Pure/testable: what matters is that we never claim more than we
+// measured (see bankMedium.js for the numbers behind the wording).
+import {
+  ANGLE_BUCKETS, MEDIUM_BUCKETS, angleBadge, angleReadiness, angleTitle,
+  mediumLimits, mediumTitle, shownBuckets,
+} from './bankMedium.js'
 
 const PAGE_SIZE = 120
 
@@ -117,7 +136,8 @@ async function fetchAllIds(bankId, params) {
 const STEP_SHORT = {
   scan: '🔎 Scan', auto_reject: '🧹 Auto-reject', score: '✨ Score',
   semantic_dedup: '✂ Crops', watermark: '🚩 Watermarks', faces: '👥 Person',
-  framing: '📐 Framing', caption: '🏷️ Caption',
+  framing: '📐 Framing', caption: '🏷️ Caption', medium: '🎨 Medium',
+  angles: '⤢ Angles',
 }
 
 /* No contact with the server, so no fresh job snapshot. Saying NOTHING here is
@@ -194,6 +214,7 @@ function ProgressBar({ activity, onCancel, offline = false }) {
             : ({ scan: 'Quality scan', faces: 'Face pass', score: 'Scoring pass',
               semantic_dedup: 'Crops & variants', watermark: 'Watermark scan',
               framing: 'Framing pass', caption: 'Captioning', promote: 'Promotion',
+              medium: 'Medium pass', angles: 'Measuring head angles',
               bank_promote: 'Copying into the new bank',
               // The one destructive pass: it must NAME itself in the bar, not
               // ride under the anonymous "Job running" fallback.
@@ -335,6 +356,64 @@ function FramingBar({ framing }) {
   )
 }
 
+// 👁 What the labels cannot see: how alike the pool actually LOOKS, measured on
+// the CLIP embeddings ✨ Score already cached. An unscored bank shows "Not
+// measured" rather than a reassuring colour — the whole point is that silence
+// must never read as variety.
+function VisualSpread({ visual, total }) {
+  const r = spreadReadout(visual)
+  if (!r) return null
+  const tone = r.tone === 'warn' ? 'border-amber-400/50 bg-amber-400/10 text-amber-200'
+    : r.tone === 'ok' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+      : 'border-border bg-surface-raised text-content-subtle'
+  const note = spreadCoverageNote(visual, total)
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wide text-content-muted">Visual spread</span>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] ${tone}`}>{r.label}</span>
+      </div>
+      <p className="m-0 text-[11px] text-content-subtle">{r.detail}</p>
+      {note && <p className="m-0 text-[11px] text-content-subtle">{note}</p>}
+    </div>
+  )
+}
+
+// The caption-derived axes, rendered from the SAME pure helpers the dataset panel
+// uses (imported, not copied) so the two surfaces cannot drift apart.
+function VarietyAxes({ variety }) {
+  if (!variety || !variety.captioned || !(variety.axes || []).length) return null
+  const chip = { ok: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+    thin: 'border-amber-400/50 bg-amber-400/10 text-amber-300',
+    gap: 'border-rose-400/50 bg-rose-400/10 text-rose-300',
+    none: 'border-border bg-surface-raised text-content-subtle' }
+  return (
+    <div className="flex flex-col gap-2 border-t border-border pt-2">
+      {variety.axes.map((axis) => (
+        <div key={axis.id} className="flex flex-col gap-1">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-[11px] uppercase tracking-wide text-content-muted">{axis.label}</span>
+            {axis.hint && <span className="text-[11px] text-content-subtle">{axis.hint}</span>}
+          </div>
+          {/* The chips decorate a sentence a screen reader can read out; the
+              sentence is the carrier, never the colour. */}
+          <span className="sr-only">{axisSummary(axis)}</span>
+          <div aria-hidden className="flex flex-wrap gap-1">
+            {axisRows(axis).map((r) => (
+              <span key={r.id}
+                title={r.count ? `${r.count} caption${r.count === 1 ? '' : 's'} mention this`
+                  : (r.state === 'gap' ? 'No caption mentions this' : 'Not mentioned (optional)')}
+                className={`rounded-full border px-2 py-0.5 text-[11px] ${chip[r.state]}`}>
+                {r.label}<span className="opacity-60"> {r.count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function CoveragePanel({ coverage, onClose, onBalance = null, balanceReason = '' }) {
   if (!coverage) {
     return <p className="text-sm text-content-subtle">Reading coverage…</p>
@@ -353,6 +432,7 @@ function CoveragePanel({ coverage, onClose, onBalance = null, balanceReason = ''
           className="rounded-md border border-border px-1.5 py-0.5 text-xs text-content-subtle hover:text-content">✕</button>
       </div>
       {coverage.framing_available && <FramingBar framing={coverage.framing} />}
+      <VisualSpread visual={coverage.visual} total={coverage.total} />
       <ul className="space-y-1 text-sm">
         {coverage.advice.map((a, i) => (
           <li key={i} className="flex items-start gap-2">
@@ -375,14 +455,18 @@ function CoveragePanel({ coverage, onClose, onBalance = null, balanceReason = ''
           <span className="text-[11px] text-content-subtle">{balanceReason}</span>
         )}
       </div>
+      <VarietyAxes variety={coverage.variety} />
       <p className="text-[11px] text-content-subtle">
-        Advice only — nothing is kept or rejected. Based on what the passes already computed.
+        Advice only — nothing is kept or rejected. Based on what the passes already computed:
+        the labels, your captions (words, not pixels — a shot the captioner never described is
+        invisible here, and “not smiling” still counts as a smile) and the ✨ Score embeddings.
+        Judged as a character source, like the framing target above.
       </p>
     </div>
   )
 }
 
-function Tile({ img, bankId, selected, onToggle, onReview, size }) {
+function Tile({ img, bankId, selected, onToggle, onReview, onTags, size }) {
   // `key` matters only for the flags list below (the one mapped array) — it was
   // missing and logged a React warning on every bank grid render.
   const badge = (txt, cls, key) => (
@@ -395,8 +479,12 @@ function Tile({ img, bankId, selected, onToggle, onReview, size }) {
           + (img.blur_score != null ? ` · sharpness ${Math.round(img.blur_score)}` : '')
           + (img.aesthetic_score != null ? ` · aesthetic ${img.aesthetic_score.toFixed(1)}` : '')
           + (img.nsfw_score != null ? ` · NSFW ${Math.round(img.nsfw_score * 100)}%` : '')
-          + (img.face_cluster ? ` · person #${img.face_cluster}` : '')
+          + (img.face_cluster ? ` · person #${img.face_cluster}`
+            // A declaration is not a measurement — the tooltip says which it is.
+            + (img.face_cluster_origin === 'asserted' ? ' (your folder assertion)' : '') : '')
           + (img.framing ? ` · ${img.framing}` : '')
+          + (img.medium ? ` · ${img.medium}` : '')
+          + (img.face_yaw != null ? ` · head turned ${Math.round(Math.abs(img.face_yaw))}°` : '')
           + (detailSummary(img)?.soft ? ` · only ~${detailSummary(img).real} px of real detail` : '')
           + (img.origin && img.origin !== 'unknown' ? ` · ${img.origin}` : '')
           + (img.style_cluster ? ` · style #${img.style_cluster}` : '')
@@ -424,6 +512,12 @@ function Tile({ img, bankId, selected, onToggle, onReview, size }) {
         {img.flags.map((f) => badge(FLAG_LABEL[f]?.slice(0, 2) || f, 'bg-black/60 text-amber-200', f))}
         {img.face_cluster != null && badge(`👤${img.face_cluster}`, 'bg-black/60 text-sky-200')}
         {img.framing && badge(`📐${img.framing}`, 'bg-black/60 text-teal-200')}
+        {/* A medium badge is stamped only when the classifier actually COMMITTED
+            to one — 'unsure' is a real verdict but it is not a label to write on
+            a thumbnail, and NULL means the pass never reached this image. */}
+        {img.medium && img.medium !== 'unsure'
+          && badge(`🎨${img.medium}`, 'bg-black/60 text-lime-200')}
+        {angleBadge(img) && badge(angleBadge(img).text, 'bg-black/60 text-cyan-200')}
         {/* Only the PROVEN states get a badge. Stamping ❔ on the 80% of files
             whose metadata was stripped would be noise, not information. */}
         {img.origin === 'ai' && badge('🤖', 'bg-black/60 text-violet-200')}
@@ -431,7 +525,18 @@ function Tile({ img, bankId, selected, onToggle, onReview, size }) {
         {img.style_cluster != null && badge(`🎨${img.style_cluster}`, 'bg-black/60 text-fuchsia-200')}
         {img.dup_group != null && badge(`≈${img.dup_group}`, 'bg-black/60 text-fuchsia-200')}
         {img.semantic_dup_group != null && badge(`✂${img.semantic_dup_group}`, 'bg-black/60 text-orange-200')}
-        {img.caption && badge('🏷️', 'bg-black/60 text-emerald-200')}
+        {/* 🏷️ is the only badge that DOES something: it lifts this image's own
+            caption words into the filter bar as tickable chips. A button, not a
+            span, so it is reachable by keyboard and announces what it opens. */}
+        {img.caption && (
+          <button type="button"
+            onClick={(e) => { e.stopPropagation(); onTags?.() }}
+            title={`Filter the bank by this image's tags — ${img.caption}`}
+            aria-label={`Use the tags of ${img.name} as a filter`}
+            className="rounded bg-black/60 px-1 text-[10px] text-emerald-200 hover:bg-black/80">
+            🏷️
+          </button>
+        )}
       </span>
       {/* ▶ starts the fast-triage lightbox AT this image. It's a separate hit
           target on purpose: the tile's own click still (de)selects for the bulk
@@ -455,17 +560,37 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
   // global — see gridSort.bankSortStorageKey). Every other facet starts empty on
   // purpose: an order is a habit, a filter is a question you asked once.
   const [filter, setFilter] = useState(() => ({ status: null, flag: null, cluster: null,
-    style: null, subfolder: null, search: null, exclude: null,
+    style: null, subfolder: null, search: null, exclude: null, tags: null,
     sort: loadBankSort(bankId), resBucket: null,
     origin: null,
-    framing: null }))
+    framing: null,
+    // Dedicated keys, never folded into `flag` or the text lane.
+    medium: null,
+    angle: null }))
   const [searchText, setSearchText] = useState('')
   // 🚫 The inverse of the search box: hide what already carries a word. Session
   // state, deliberately NOT remembered like the sort — an order you can see in a
   // menu is a habit, images missing from a grid for a reason you set last week
   // reads as data loss.
   const [excludeText, setExcludeText] = useState('')
+  // 🏷️ Tag chips lifted off ONE image's caption. `tagSource` is the image the
+  // chips were read from (kept so the row can say WHOSE tags these are — chips
+  // with no provenance are just mystery words), `tagPicked` the ticked subset.
+  // Both are session state: this is a question you ask about one image now, not
+  // a standing preference like the sort order.
+  const [tagSource, setTagSource] = useState(null)
+  const [tagPicked, setTagPicked] = useState(() => new Set())
   const [subfolders, setSubfolders] = useState([])
+  // 👤 Folder-level person assertions ("this subfolder is one person").
+  const [folderPersons, setFolderPersons] = useState([])
+  // The whole folder-person payload: assertions PLUS the suggestions the app
+  // probed by itself, and what a scan would cost.
+  const [folderPersonInfo, setFolderPersonInfo] = useState(null)
+  const [folderPersonBusy, setFolderPersonBusy] = useState(false)
+  // 👤 The preflight of the person pass: { plan, probing, run } — `run` is the
+  // pass (or the whole 🚀 Launch all) the user actually asked for, held until
+  // they have answered the folder question.
+  const [preflight, setPreflight] = useState(null)
   const [offset, setOffset] = useState(0)
   const [page, setPage] = useState({ images: [], total: 0 })
   const [selected, setSelected] = useState(() => new Set())
@@ -527,6 +652,9 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
   // Caption register for the 🏷️ Caption pass ('' = model's own wording). Explicit is
   // the NSFW lane — same registers as the dataset caption, passed per-run.
   const [captionVocab, setCaptionVocab] = useState('')
+  // Caption LENGTH preset, per RUN like the vocabulary register above (a bank has no
+  // caption_options row to persist to). '' = standard: nothing appended to the prompt.
+  const [captionLength, setCaptionLength] = useState('')
   // Coverage advice (idea by @antonp) — a collapsible read-only panel, fetched
   // on demand (and refreshed whenever it's open and the bank changes).
   const [coverageOpen, setCoverageOpen] = useState(false)
@@ -585,6 +713,8 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
     // The exclude terms travel with the search on every surface that reads a
     // filter — the grid, "Select all in filter", ▶ Review and the curation picks.
     if (f.exclude) params.exclude = f.exclude
+    // 🏷️ ticked chips — its own key, matched as WORDS and ANDed server-side.
+    if (f.tags) params.tags = f.tags
     // Grid sort (any measured quantity, each way) — sent to the grid
     // AND to fetchAllIds so "Select all in filter" and > Review walk the SAME
     // order the user is looking at. 'default' keeps the server's flag order.
@@ -596,6 +726,11 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
     if (f.framing) params.framing = f.framing
     // Origin state (ai/camera/unknown) — a facet like the flags.
     if (f.origin) params.origin = f.origin
+    // 🎨 what the picture is made of, and ⤢ where the head points. Their OWN
+    // query keys, so they compose with search/exclude/sort instead of fighting
+    // them for one.
+    if (f.medium) params.medium = f.medium
+    if (f.angle) params.angle = f.angle
     return params
   }, [])
 
@@ -656,7 +791,58 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
   useEffect(() => {
     if (coverageOpen) loadCoverage()
   }, [coverageOpen, loadCoverage, payload?.counts?.keep,
-      payload?.counts?.framing_classified])
+      payload?.counts?.framing_classified,
+      // The panel now also reads captions and embeddings, so it must refresh
+      // when those passes land — otherwise it keeps showing "no captions yet"
+      // after the 🏷️ pass finished.
+      payload?.counts?.captioned, payload?.counts?.scored])
+
+  // 👤 "Single person here" — the folder-level person assertions. Reloaded when
+  // a job LANDS too: the sample check writes its verdict from the background.
+  const loadFolderPersons = useCallback(() => {
+    apiFetch(`/api/bank/${bankId}/folder-persons`)
+      .then((d) => { setFolderPersons(d.assertions || []); setFolderPersonInfo(d) })
+      .catch(() => { setFolderPersons([]); setFolderPersonInfo(null) })
+  }, [bankId])
+
+  useEffect(() => { loadFolderPersons() }, [loadFolderPersons, live])
+
+  const runFolderPerson = async (call, success) => {
+    setFolderPersonBusy(true)
+    try {
+      const d = await call()
+      if (success) toast.success(success(d))
+      // The payload too, not only the grid: an assertion creates (or dissolves)
+      // a person cluster, and the PEOPLE row above would otherwise keep showing
+      // a group that no longer exists until the next poll.
+      loadFolderPersons(); refreshImages(); refreshPayload({ force: true })
+    } catch (e) {
+      toast.error(e?.message || 'That did not work')
+    } finally { setFolderPersonBusy(false) }
+  }
+
+  const assertFolderPerson = () => runFolderPerson(
+    () => postJson(`/api/bank/${bankId}/folder-person`, { subfolder: filter.subfolder }),
+    (d) => `${d.images} image(s) grouped as person #${d.cluster_id} — the face pass `
+      + 'will skip them',
+  )
+
+  const revokeFolderPerson = () => runFolderPerson(
+    () => del(`/api/bank/${bankId}/folder-person`
+      + `?subfolder=${encodeURIComponent(filter.subfolder ?? '')}`),
+    (d) => `${d.cleared} image(s) back to normal clustering`,
+  )
+
+  const checkFolderPerson = () => runFolderPerson(
+    () => postJson(`/api/bank/${bankId}/folder-person/check`,
+      { subfolder: filter.subfolder }),
+    (d) => `Checking ${d.sample_size} images of this folder…`,
+  )
+
+  const scanFolderPersons = () => runFolderPerson(
+    () => postJson(`/api/bank/${bankId}/folder-scan`, {}),
+    () => 'Sampling the folders — nothing is grouped until you confirm',
+  )
 
   // Leaving the selection view: back to the facet grid.
   const exitSelectionView = () => { setShowSelected(false); setSelectedOrder(null) }
@@ -687,6 +873,30 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
     saveBankSort(bankId, sort)
     setFilter(f); setOffset(0); exitSelectionView()
     refreshImages(f, 0, { on: false })
+  }
+
+  // 🏷️ Open the chip row on an image, with nothing ticked yet: reading the tags
+  // is not the same act as filtering by them, and auto-applying all of them would
+  // usually return that one image alone.
+  const openTagPicker = (img) => {
+    setTagSource(img)
+    setTagPicked(new Set())
+    if (filter.tags) setF({ tags: null })
+  }
+
+  // Tick / untick one chip and re-filter immediately — the grid IS the feedback,
+  // so an Apply button would only add a click between the question and its answer.
+  const toggleTag = (tag) => {
+    const next = new Set(tagPicked)
+    if (next.has(tag)) next.delete(tag); else next.add(tag)
+    setTagPicked(next)
+    setF({ tags: tagsParam(next) })
+  }
+
+  const clearTags = () => {
+    setTagSource(null)
+    setTagPicked(new Set())
+    if (filter.tags) setF({ tags: null })
   }
 
   // Debounce the search box, then apply it as a filter (page 1, selection cleared).
@@ -743,22 +953,112 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
 
   const startScan = (rescan) => act(
     () => postJson(`/api/bank/${bankId}/scan`, { rescan: !!rescan }), null)
-  const startFaces = () => act(() => postJson(`/api/bank/${bankId}/faces`, {}), null)
+  const runFacesPass = () => act(() => postJson(`/api/bank/${bankId}/faces`, {}), null)
+
+  /* 👤 THE PREFLIGHT GATE.
+     The person pass is the bank's most expensive one, and on scraped material
+     most of it is spent rediscovering what the folder names already said. The
+     app knew how to sample folders and offer the obvious ones — but only from a
+     panel the user who presses 🚀 Launch all never opens. So the sampling now
+     runs HERE, in front of the pass, whichever button started it.
+
+     `gate` returns:
+       false      — nothing worth asking (no subfolder, or all declared already);
+                    the caller runs its pass immediately, exactly as before.
+       'refused'  — the bank is busy. The refusal is raised at THIS point on
+                    purpose: it is the same 409 the pass itself would produce, so
+                    the Launch all dialog still gets it while its checkboxes are
+                    alive, instead of losing them to a preflight that dies later.
+       true       — the dialog is up and owns the decision. */
+  const gate = async (run, onRefusal) => {
+    let plan = null
+    try { plan = await apiFetch(`/api/bank/${bankId}/person-preflight`) } catch { plan = null }
+    if (!preflightNeeded(plan)) return false
+    if (preflightWillSample(plan)) {
+      try {
+        await postJson(`/api/bank/${bankId}/person-preflight`, {})
+      } catch (e) {
+        const kind = e?.body?.busy_kind
+        const message = e?.status === 409 && kind
+          ? busyRefusal({ kind, activity: payload?.activity })
+          : (e?.message || 'Could not check the folders.')
+        if (onRefusal) onRefusal(message); else toast.error(message)
+        return 'refused'
+      }
+      // The 2 s poll only ticks while a job is live, and the payload we hold
+      // predates the one we just started — refresh so the dialog can watch it.
+      refreshPayload({ force: true })
+    }
+    setPreflight({ plan, probing: preflightWillSample(plan), run })
+    return true
+  }
+
+  const startFaces = async () => {
+    const gated = await gate(runFacesPass)
+    if (gated === true || gated === 'refused') return null
+    return runFacesPass()
+  }
+
+  /* The answer. Accepted folders become ORDINARY assertions (same endpoint
+     family, same revoke) and only then does the pass the user asked for run. */
+  const proceedPreflight = async ({ accept }) => {
+    const run = preflight?.run
+    setPreflight(null)
+    if (accept && accept.length) {
+      const d = await act(
+        () => postJson(`/api/bank/${bankId}/folder-persons/accept`, { subfolders: accept }),
+        null)
+      if (d) {
+        const missed = (d.failed || []).length
+        toast.success(`${d.accepted.length} folder(s) · ${d.images} image(s) grouped `
+          + 'as one person each — the pass will skip them'
+          + (missed ? ` · ${missed} could not be grouped` : ''))
+      }
+      loadFolderPersons()
+    }
+    if (run) await run()
+  }
   const startScore = () => act(() => postJson(`/api/bank/${bankId}/score`, {}), null)
   const startSemanticDedup = () => act(
     () => postJson(`/api/bank/${bankId}/semantic-dedup`, {}), null)
   const startFraming = () => act(() => postJson(`/api/bank/${bankId}/framing`, {}), null)
+  // 🎨 Medium reuses the ✨ Score embeddings — no image is looked at twice and
+  // no GPU is taken, which is why it has no capability gate of its own.
+  const startMedium = () => act(() => postJson(`/api/bank/${bankId}/medium`, {}), null)
+  // ⤢ the opt-in angle backfill. Its own endpoint, never folded into 🎭 Faces:
+  // it is hours of work on a big bank and nobody must pay it by accident.
+  const startAngles = () => act(() => postJson(`/api/bank/${bankId}/angles`, {}), null)
   const startCaption = () => act(
     () => postJson(`/api/bank/${bankId}/caption`, {
       ...(selected.size ? { image_ids: [...selected] } : {}),
       ...(captionVocab ? { vocabulary: captionVocab } : {}),
+      ...(captionLength ? { length: captionLength } : {}),
     }), null)
   const cancelJob = () => act(() => postJson(`/api/bank/${bankId}/cancel`, {}), null)
   /* Posts with the dialog still OPEN and answers {ok,error}: a refused launch —
      "a scan job is already running on this bank" is the usual one — used to close
      the dialog first and reset all seven pass checkboxes and the reject flags to
-     their defaults. The dialog decides what to do with the answer. */
+     their defaults. The dialog decides what to do with the answer.
+
+     🚀 Launch all is also the FIRST thing a new user presses, so it is the path
+     the folder check has to be on — otherwise that saving only ever reaches the
+     people who went looking for it. The question is asked BEFORE the run starts,
+     which is the only honest place for it: the point of Launch all is walking
+     away, and a dialog that woke the user three passes in would defeat that.
+     The gate posts too, so a busy bank is refused HERE, while the checkboxes
+     are still alive — the rule this whole contract is about. */
   const startPipeline = async (config) => {
+    if ((config?.steps || []).includes('faces')) {
+      let error = null
+      const gated = await gate(() => runPipeline(config), (m) => { error = m })
+      if (gated === 'refused') return { ok: false, error }
+      // The preflight dialog owns the launch now; the Launch all card can close.
+      if (gated === true) { setLaunchOpen(false); return { ok: true } }
+    }
+    return runPipeline(config)
+  }
+
+  const runPipeline = async (config) => {
     let error = null
     const d = await act(() => postJson(`/api/bank/${bankId}/pipeline`, config),
       '🚀 Launch all started — you can walk away; Stop any time.',
@@ -1033,6 +1333,14 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
   // "no AI images here", when what it means is "none that still carry metadata".
   const originCounts = payload?.origins || {}
   const originMeasured = ORIGIN_BUCKETS.reduce((n, b) => n + (originCounts[b.id] || 0), 0)
+  // 🎨 Medium / ⤢ Angle — same "only show what holds something, plus the active
+  // one" rule as the framing and resolution rows.
+  const mediumCounts = payload?.mediums || {}
+  const shownMediums = shownBuckets(MEDIUM_BUCKETS, mediumCounts, filter.medium)
+  const mediumNote = mediumLimits(mediumCounts, counts?.medium_classified)
+  const angleCounts = payload?.angles || {}
+  const shownAngles = shownBuckets(ANGLE_BUCKETS, angleCounts, filter.angle)
+  const angleState = angleReadiness(payload)
   const visionReady = !!caps.ollama?.vision_model_ready
   // The explicit lane only spells acts out with an uncensored (abliterated) vision
   // model. We can't prove abliteration, but the common builds name themselves — a soft
@@ -1063,7 +1371,7 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
   // Is any facet narrowing the grid? Drives the "N shown of TOTAL" readout.
   const isFiltered = !!(filter.status || filter.flag || filter.cluster != null
     || filter.style != null || filter.subfolder != null || filter.search
-    || filter.resBucket || filter.framing)
+    || filter.resBucket || filter.framing || filter.medium || filter.angle)
 
   // The ONE recommended next step, from the counters the header strip already
   // reads. Advisory only — draws an amber "Next step" accent on that zone.
@@ -1154,7 +1462,7 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
       <ZoneSection zone={analyzeZone} accented={activeStep === 'analyze'}>
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" onClick={() => setLaunchOpen(true)} disabled={live || !(counts?.total > 0)}
-          title="Run the whole triage in one go — scan, auto-reject, score, watermarks, group by person and (optionally) caption. Start it and walk away."
+          title="Run the whole triage in one go — scan, auto-reject, score, watermarks, group by person and (optionally) caption. Start it and walk away. If the person pass is in, it checks your folders first and asks once, before the run."
           className="rounded-md bg-gradient-primary px-4 py-2 text-sm font-bold text-white shadow disabled:opacity-50">
           🚀 Launch all…
         </button>
@@ -1179,7 +1487,7 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
           )}
           <PassButton onClick={startFaces} disabled={live || !caps.face_scoring}
             title={caps.face_scoring
-              ? 'Detect the dominant face of every non-rejected image and cluster the bank by person (no reference needed). CPU, can take a while on thousands of images.'
+              ? 'Detect the dominant face of every non-rejected image and cluster the bank by person (no reference needed). CPU, can take a while on thousands of images. It samples your subfolders first and offers the ones that look like a single person, so you can skip them.'
               : 'Install the Quality tools (Setup) to sort by person'}>
             👥 Group by person
           </PassButton>
@@ -1189,6 +1497,12 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
                 holdsTheGpu(scoreDevice) ? ', and holds the GPU (ComfyUI is unloaded and training cannot start) for its duration' : ' on the CPU, leaving the GPU free'}.`
               : 'Install the Bank scoring extra (Setup ▸ Quality tools) to score aesthetics / NSFW / style'}>
             ✨ Score{!caps.bank_scoring && ' (needs setup)'}
+          </PassButton>
+          <PassButton onClick={startMedium} disabled={live || !caps.bank_scoring}
+            title={caps.bank_scoring
+              ? 'Sort every scored image into photograph / anime / 3D render / illustration — read off the CLIP embeddings ✨ Score already computed, so no image is looked at again and the GPU stays free. It answers “unsure” rather than guessing: measured on a real 23 500-image bank, it named 2 anime drawings and no wrong verdict.'
+              : 'Install the Bank scoring extra (Setup ▸ Quality tools) — 🎨 Medium reads the embeddings ✨ Score produces'}>
+            🎨 Classify medium{!caps.bank_scoring && ' (needs setup)'}
           </PassButton>
           <PassButton onClick={startFraming} disabled={live || !visionReady}
             title={visionReady
@@ -1215,6 +1529,15 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
               title="How captions name nude or sexual content. Explicit needs an uncensored (abliterated) Ollama vision model. Richer, more explicit captions also make the 🔍 search find more."
               className="px-2 py-1 rounded-lg bg-app/60 border border-border text-content text-xs disabled:opacity-40">
               {VOCABULARY_OPTIONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1 text-xs text-content-subtle">
+            <span className="sr-only">Caption length</span>
+            <select value={captionLength} onChange={(e) => setCaptionLength(e.target.value)}
+              disabled={live} aria-label="Caption length"
+              title="How much the captioner writes. Concise aims for one short sentence, Detailed for several - a target the model follows loosely, not a hard cap. Standard leaves the prompt untouched. Longer captions give the search more to match on."
+              className="px-2 py-1 rounded-lg bg-app/60 border border-border text-content text-xs disabled:opacity-40">
+              {CAPTION_LENGTH_OPTIONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           </label>
         </div>
@@ -1356,23 +1679,88 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-content-subtle hover:text-content">✕</button>
             )}
           </div>
-          {/* Subfolder scoping (a Telegram export nests one folder per chat/date) */}
+          {/* Subfolder scoping (a Telegram export nests one folder per chat/date).
+              Scoping to ONE folder is also the moment the user knows whose it is,
+              so the 👤 "Single person here" assertion lives right under it — and
+              only then, which is why the group takes the full row only when a
+              folder is actually scoped (otherwise it stays inline as before). */}
           {subfolders.length > 1 && (
-            <div className="flex items-center gap-1.5">
-              <GroupLabel>Subfolder</GroupLabel>
-              <select value={filter.subfolder ?? '__all__'}
-                onChange={(e) => setF({ subfolder: e.target.value === '__all__' ? null : e.target.value })}
-                className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-content">
-                <option value="__all__">All subfolders</option>
-                {subfolders.map((s) => (
-                  <option key={s.name || '__root__'} value={s.name}>
-                    {s.name === '' ? '(bank root)' : s.name} · {s.count}
-                  </option>
-                ))}
-              </select>
+            <div className={`flex flex-col gap-1.5 ${filter.subfolder != null ? 'w-full' : ''}`}>
+              <div className="flex items-center gap-1.5">
+                <GroupLabel>Subfolder</GroupLabel>
+                <select value={filter.subfolder ?? '__all__'}
+                  onChange={(e) => setF({ subfolder: e.target.value === '__all__' ? null : e.target.value })}
+                  className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-content">
+                  <option value="__all__">All subfolders</option>
+                  {subfolders.map((s) => (
+                    <option key={s.name || '__root__'} value={s.name}>
+                      {s.name === '' ? '(bank root)' : s.name} · {s.count}
+                      {/* '👤?' = the app sampled this folder and it looked like
+                          one person. A hint that something is worth opening,
+                          never a claim — the panel below says the numbers. */}
+                      {folderMarker(folderPersonInfo?.suggestions, s.name)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <SubfolderPersonPanel
+                subfolder={filter.subfolder}
+                entry={assertionFor(folderPersons, filter.subfolder)}
+                suggestion={suggestionFor(folderPersonInfo?.suggestions, filter.subfolder)}
+                offer={scanOffer(folderPersonInfo)}
+                busy={folderPersonBusy}
+                onAssert={assertFolderPerson}
+                onRevoke={revokeFolderPerson}
+                onCheck={checkFolderPerson}
+                onScan={scanFolderPersons} />
             </div>
           )}
         </div>
+
+        {/* 🏷️ Tags of ONE image, as chips you tick. Opened from a tile's 🏷️
+            badge, and rendered HERE — with the other filters — rather than in a
+            popover on the tile or inside ▶ Review: filtering is a grid gesture,
+            it has to stay visible while it is active, and the review lightbox
+            walks a FROZEN snapshot that a filter change could not honestly
+            alter. Ticking re-filters immediately; the sentence spells out that
+            several chips mean AND, because a set that shrinks with every click
+            is only obvious once you already know the rule. */}
+        {tagSource && (
+          <div className="space-y-1.5 rounded-lg border border-emerald-400/30 bg-emerald-500/5 px-2.5 py-2">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <GroupLabel>🏷️ Tags of {tagSource.name}</GroupLabel>
+              <span className="text-[11px] text-content-subtle">
+                attributes you pick — unlike 🎯 Similar, which matches the look
+              </span>
+              <button type="button" onClick={clearTags}
+                className="ml-auto rounded border border-border px-2 py-0.5 text-[11px] text-content-muted hover:text-content">
+                ✕ Close
+              </button>
+            </div>
+            {captionChips(tagSource.caption).length === 0 ? (
+              <p className="m-0 text-xs text-content-muted">
+                This caption has no word worth filtering on.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {captionChips(tagSource.caption).map((tag) => (
+                  <Chip key={tag} active={tagPicked.has(tag)} onClick={() => toggleTag(tag)}
+                    title={tagPicked.has(tag)
+                      ? `Stop requiring “${tag}”`
+                      : `Show only images whose caption mentions “${tag}”`}>
+                    {tag}
+                  </Chip>
+                ))}
+              </div>
+            )}
+            {tagPicked.size > 0 && (
+              <p className="m-0 text-[11px] text-content-muted">
+                {tagFilterSummary(tagPicked)} Matched as whole words, in captions
+                and file names.
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Filters — grouped by facet so the chips read as a system, not a wall */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -1475,6 +1863,60 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
                 </Chip>
               ))}
             </FilterGroup>
+          )}
+
+          {/* 🎨 Medium — what the picture is MADE of, from the ✨ Score
+              embeddings. A DIFFERENT question from 🔎 Origin above, which reads
+              the file's metadata: a photorealistic AI render is 🤖 AI and 📷
+              Photo at once. The limits sentence is part of the row, not a
+              tooltip, because "unsure" being the second-biggest pile is the
+              single most important thing to know about this measurement. */}
+          {shownMediums.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <FilterGroup label="🎨 Medium">
+                {shownMediums.map((b) => (
+                  <Chip key={b.id} active={filter.medium === b.id}
+                    onClick={() => setF({ medium: filter.medium === b.id ? null : b.id })}
+                    title={mediumTitle(b.id)}>
+                    {b.label} {mediumCounts[b.id] ?? 0}
+                  </Chip>
+                ))}
+              </FilterGroup>
+              {mediumNote && (
+                <p className="m-0 pl-1 text-[11px] leading-snug text-content-subtle">{mediumNote}</p>
+              )}
+            </div>
+          )}
+
+          {/* ⤢ Angle — measured in the pixels by the 🎭 Faces pass. The backfill
+              offer lives HERE rather than with the other passes: it only makes
+              sense next to the counts that explain why it exists, and it must be
+              priced before it is clicked. */}
+          {(shownAngles.length > 0 || angleState.offer) && (
+            <div className="flex flex-col gap-1">
+              <FilterGroup label="⤢ Angle">
+                {shownAngles.map((b) => (
+                  <Chip key={b.id} active={filter.angle === b.id}
+                    onClick={() => setF({ angle: filter.angle === b.id ? null : b.id })}
+                    title={angleTitle(b.id)}>
+                    {b.label} {angleCounts[b.id] ?? 0}
+                  </Chip>
+                ))}
+              </FilterGroup>
+              {angleState.note && (
+                <p className="m-0 pl-1 text-[11px] leading-snug text-content-subtle">{angleState.note}</p>
+              )}
+              {angleState.offer && (
+                <p className="m-0 flex flex-wrap items-center gap-2 pl-1 text-[11px] leading-snug text-content-subtle">
+                  <span>{angleState.offer.why}</span>
+                  <button type="button" onClick={startAngles} disabled={!!live}
+                    title={angleState.offer.why}
+                    className="rounded-md border border-border bg-surface-raised px-2 py-0.5 text-[11px] text-content transition-colors hover:bg-surface disabled:opacity-50">
+                    ⤢ {angleState.offer.label}
+                  </button>
+                </p>
+              )}
+            </div>
           )}
         </div>
 
@@ -2046,6 +2488,7 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
               <Tile key={img.id} img={img} bankId={bankId} size={tileSize}
                 selected={selected.has(img.id)}
                 onReview={() => openReview(img.id)}
+                onTags={() => openTagPicker(img)}
                 onToggle={() => setSelected((prev) => {
                   const next = new Set(prev)
                   if (next.has(img.id)) next.delete(img.id); else next.add(img.id)
@@ -2091,6 +2534,15 @@ export default function BankWorkspace({ bankId, onBack, onGone }) {
       {launchOpen && (
         <LaunchAllDialog caps={caps} visionReady={visionReady}
           onClose={() => setLaunchOpen(false)} onLaunch={startPipeline} />
+      )}
+
+      {preflight && (
+        <PersonPreflightDialog plan={preflight.plan} probing={preflight.probing}
+          activity={payload?.activity}
+          reload={() => apiFetch(`/api/bank/${bankId}/person-preflight`)}
+          onProceed={proceedPreflight}
+          onStopProbe={() => postJson(`/api/bank/${bankId}/cancel`, {})}
+          onCancel={() => setPreflight(null)} />
       )}
 
       {scoringPythonOpen && (

@@ -246,7 +246,8 @@ def put_settings():
     # which probe_watermark_inpaint falls back to the app's own Pillow-12 venv and the
     # feature reads "NOT installed" forever despite a perfect install. Drop the blank so
     # a stale Save can't undo an install. (aitoolkit.python IS user-editable — not here.)
-    for _managed in ('watermark', 'masks', 'face_scoring', 'bank_scoring'):
+    for _managed in ('watermark', 'masks', 'face_scoring', 'bank_scoring',
+                     'watermark_detect'):
         node = config_partial.get(_managed)
         if isinstance(node, dict) and 'python' in node and not str(node.get('python') or '').strip():
             node.pop('python')
@@ -326,7 +327,13 @@ def seedvr2_models_list():
     plus the catalog of builds the app can talk about.
 
     ``{installed: [name], catalog: [{file, label, size_gb, vram_gb, recommended,
-    installed}], resolved: name|null, vae: name|null}``.
+    installed}], resolved: name|null, vae: name|null,
+    vae_choices: [{file, likely_vae}]}``.
+
+    ``vae_choices`` covers the WHOLE folder, each entry flagged with whether its
+    name looks like a VAE: the automatic path already handles every install
+    where it does, so the pin exists for the one where it does not, and a picker
+    that hid those files could not express that install.
 
     Only installed builds are offered as a pin: the pack's loader nodes download
     an unknown name on first use, so a picker listing everything would turn a
@@ -340,12 +347,14 @@ def seedvr2_models_list():
         installed = svr.installed_dit_models()
         resolved = svr.resolve_seedvr2_dit()
         vae = svr.resolve_seedvr2_vae()
+        vae_choices = svr.vae_choices()
     except Exception:
         current_app.logger.exception('seedvr2 model scan failed')
-        installed, resolved, vae = [], None, None
+        installed, resolved, vae, vae_choices = [], None, None, []
     catalog = [{**v, 'installed': v['file'] in installed} for v in svr.DIT_VARIANTS]
     return jsonify({'installed': installed, 'catalog': catalog,
-                    'resolved': resolved, 'vae': vae})
+                    'resolved': resolved, 'vae': vae,
+                    'vae_choices': vae_choices})
 
 
 @bp.get('/scoring-python')
@@ -451,6 +460,10 @@ def update_check():
             return jsonify(_git_check_cache['data'])
         gs = updater.git_update_status()
         if gs is not None:
+            # Pinokio: the commits-behind answer stays true and useful (its
+            # Update tab pulls exactly those), only the in-app apply must go.
+            if updater.is_pinokio_runtime():
+                gs.update(updater.pinokio_update_payload())
             _git_check_cache.update(ts=now, data=gs)
             return jsonify(gs)
     now = time.time()
@@ -462,6 +475,8 @@ def update_check():
            'update_available': False, 'url': f'https://github.com/{repo}/releases'}
     if docker_runtime:
         out.update(updater.docker_update_payload())
+    if updater.is_pinokio_runtime():
+        out.update(updater.pinokio_update_payload())
     sha = updater.current_sha()
     if sha:
         out['current_sha'] = sha
@@ -485,7 +500,10 @@ def update_check():
                     zip_size = int(a.get('size') or 0)
                     if 'windows' in name:
                         break
-            if not docker_runtime:
+            # Neither container nor Pinokio install may advertise an in-app
+            # apply just because the release carries a ZIP: both update from
+            # outside this process.
+            if not docker_runtime and not updater.is_pinokio_runtime():
                 out['can_apply'] = bool(zip_size) or any(
                     (a.get('name') or '').lower().endswith('.zip') and a.get('browser_download_url')
                     for a in (j.get('assets') or []))
@@ -518,6 +536,16 @@ def update_apply():
             'ok': False,
             'reason': 'Docker GPU installs must be updated by rebuilding the image.',
             **updater.docker_update_payload(),
+        })
+    # Pinokio owns the process: pulling here would work, but the restart that
+    # follows would detach the server from the launcher that is supposed to
+    # stop and start it. Refuse before touching git.
+    if updater.is_pinokio_runtime():
+        return jsonify({
+            'ok': False,
+            'reason': 'Pinokio installs are updated from the launcher: '
+                      'Stop, then Update, then Start.',
+            **updater.pinokio_update_payload(),
         })
     if updater.is_git_checkout():
         res = updater.apply_update()
@@ -598,6 +626,71 @@ def run_archive_clear():
     database and survive; only the ability to LOOK at a since-deleted image goes."""
     from ..services import run_archive
     return jsonify({'ok': True, **run_archive.clear()})
+
+
+@bp.get('/storage/locations')
+def storage_locations():
+    """The “what lives where” map: every category, its effective path and
+    whether it can be relocated. Deliberately size-free — measuring means
+    walking tens of thousands of files, which belongs to an explicit click
+    (see /storage/sizes), never to a tab mount."""
+    from ..services import storage_locations as sl
+    payload = {'locations': sl.locations()}
+    for entry in payload['locations']:
+        if entry['path']:
+            entry['volume'] = sl.free_space(entry['path'])
+    return jsonify(payload)
+
+
+@bp.get('/storage/sizes')
+def storage_sizes():
+    """Bytes held by each requested category (?keys=a,b — all of them when
+    absent). This is the walk the map's “Measure” button pays for."""
+    from ..services import storage_locations as sl
+    raw = (request.args.get('keys') or '').strip()
+    keys = [k for k in raw.split(',') if k.strip()] if raw else None
+    sizes = sl.sizes(keys)
+    return jsonify({'ok': True, 'sizes': sizes,
+                    'total_bytes': sum(sizes.values())})
+
+
+@bp.post('/storage/validate')
+def storage_validate():
+    """Is this folder usable for that category? Proves writability by writing a
+    probe file — permission bits lie on Windows. Writes no config."""
+    from ..services import storage_locations as sl
+    body = request.get_json(silent=True) or {}
+    key = str(body.get('key') or '')
+    return jsonify(sl.validate_target(key, body.get('path')))
+
+
+@bp.post('/storage/move')
+def storage_move():
+    """Start moving a category's current content into its new folder. The
+    location change itself is a normal settings save; this only carries the
+    bytes, and never runs unless the user asked for it (the alternative,
+    “adopt the empty folder”, saves without calling this)."""
+    from ..services import storage_locations as sl
+    body = request.get_json(silent=True) or {}
+    try:
+        res = sl.start_move(str(body.get('key') or ''), body.get('path'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'ok': True, **res})
+
+
+@bp.get('/storage/move/progress')
+def storage_move_progress():
+    from ..services import storage_locations as sl
+    return jsonify({'ok': True, 'job': sl.move_progress(request.args.get('job_id'))})
+
+
+@bp.post('/storage/adopt-checkpoints')
+def storage_adopt_checkpoints():
+    """Re-run the staging → checkpoint-store retrofit on demand. Idempotent: on
+    an already-migrated install it moves nothing and says so."""
+    from ..services import cloud_training as ct
+    return jsonify({'ok': True, **ct.migrate_checkpoints_into_store(force=True)})
 
 
 @bp.post('/trash/open')

@@ -179,6 +179,207 @@ export function fullTransformerArtifactView(run = {}) {
   };
 }
 
+/** The files a delivered full model actually contains, and which one to take.
+ *
+ * A dense run delivers a ~26 GB bf16 master and (when the export ran) a ~10 GB
+ * fp8 twin. They are NOT interchangeable and the difference is the whole point:
+ * the fp8 file is what ComfyUI loads to generate; the bf16 file is the only one
+ * that can be trained again, merged or re-quantized. Listing them without
+ * saying which is which is how someone downloads 26 GB they cannot use, or
+ * deletes the only copy they could have continued from.
+ *
+ * Returns [] for a run that has not delivered — nothing to choose between.
+ */
+export function fullTransformerArtifactFiles(run = {}) {
+  const localAvailable = String(run.local_artifact_status || '').trim().toLowerCase() === 'available';
+  const hubAvailable = String(run.artifact_status || '').trim().toLowerCase() === 'available';
+  if (!localAvailable && !hubAvailable) return [];
+  const files = [];
+  const fp8Status = String(run.fp8_export_status || '').trim().toLowerCase();
+  // A local delivery names the file that is on the disk; a Hugging Face one
+  // names the object in the repository. Same two roles, two addresses — and the
+  // note has to say which, or "download this one" points at nothing.
+  const fp8Name = localAvailable
+    ? (run.local_fp8_filename || null)
+    : (fp8Status === 'done' ? run.fp8_weight_filename : null);
+  if (fp8Name) {
+    files.push({
+      kind: 'fp8',
+      name: String(fp8Name),
+      sizeBytes: (localAvailable
+        ? (typeof run.local_fp8_bytes === 'number' ? run.local_fp8_bytes : null)
+        : (typeof run.fp8_size_bytes === 'number' ? run.fp8_size_bytes : null)),
+      primary: true,
+      note: localAvailable
+        ? 'Use this one in ComfyUI — quantized fp8, already on this computer.'
+        : 'Download this one for ComfyUI — quantized fp8, loads with the standard Load Diffusion Model node.',
+    });
+  }
+  const masterName = localAvailable
+    ? run.local_weight_filename
+    : (run.fp8_keep_bf16 !== false ? run.hf_weight_filename : null);
+  if (masterName) {
+    files.push({
+      kind: 'bf16',
+      name: String(masterName).split('/').pop(),
+      sizeBytes: (localAvailable
+        ? (typeof run.local_weight_bytes === 'number' ? run.local_weight_bytes : null)
+        : (run.hf_artifact_proof?.size_bytes ?? null)),
+      primary: files.length === 0,
+      note: files.length === 0
+        ? 'Full-precision master. Usable in ComfyUI, but large.'
+        : 'Full-precision master — keep it if you may ever continue training, merge or re-quantize.',
+    });
+  }
+  return files;
+}
+
+/** The model the fp8 tool should aim at on its own, or null.
+ *
+ * This is what turns "paste an absolute path" into one click, and it is
+ * deliberately derived from the SAME `hf_weight_filename` the artifact card
+ * lists above it: a dense repository holds the final save and several ~26 GB
+ * step snapshots whose names differ by a number, and the card naming one while
+ * the operation took another is exactly the bug this closes. One value, read
+ * once, handed to both.
+ *
+ * Null when there is nothing to aim at: no delivered master, or an fp8 twin the
+ * run already produced (converting it again would only lose precision).
+ */
+export function denseQuantizeTarget(run = {}) {
+  const files = fullTransformerArtifactFiles(run);
+  if (!files.length || files.some((file) => file.kind === 'fp8')) return null;
+  const master = files.find((file) => file.kind === 'bf16');
+  if (!master || !run.hf_repo_id) return null;
+  return {
+    repoId: run.hf_repo_id,
+    filename: String(run.hf_weight_filename || '').split('/').pop() || null,
+    family: run.train_type || null,
+    name: master.name,
+    sizeBytes: master.sizeBytes,
+    label: 'The full model this dataset’s run delivered',
+  };
+}
+
+/** Why an expected fp8 export is not in the list. Never an error state: the
+ * bf16 master is delivered either way, so this is a missing convenience. */
+export function fullTransformerFp8Note(run = {}) {
+  const status = String(run.fp8_export_status || '').trim().toLowerCase();
+  if (status === 'failed') {
+    return String(run.fp8_export_detail || '')
+      || 'The fp8 export did not complete — the full-precision model was delivered.';
+  }
+  return null;
+}
+
+/** Where a full model is delivered. An older run carries no stamp at all: it was
+ * delivered to Hugging Face and nothing else, which is what it must keep
+ * meaning — reading a missing value as today's default would claim a local file
+ * that never existed. */
+export function denseDelivery(run = {}) {
+  const value = String(run.dense_delivery || '').trim().toLowerCase();
+  return ['local', 'hub', 'both'].includes(value) ? value : 'hub';
+}
+
+export function denseDeliversLocally(run = {}) {
+  return isFullTransformerRun(run) && denseDelivery(run) !== 'hub';
+}
+
+export function denseDeliversToHub(run = {}) {
+  return isFullTransformerRun(run) && denseDelivery(run) !== 'local';
+}
+
+/** The state of the copy on THIS computer, as a card can render it.
+ * Returns null for a run that has no local delivery — there is nothing to say
+ * about a file that was never meant to exist. */
+export function denseLocalArtifactView(run = {}) {
+  if (!denseDeliversLocally(run)) return null;
+  const status = String(run.local_artifact_status || '').trim().toLowerCase();
+  const detail = String(run.local_artifact_detail || '').trim();
+  const dir = String(run.local_artifact_dir || '').trim();
+  const name = String(run.local_weight_filename || '').trim();
+  const ended = !!run.status && !['preparing', 'provisioning', 'uploading',
+    'training', 'downloading', 'terminating'].includes(String(run.status));
+  if (status === 'available') {
+    return {
+      status, available: true, tone: 'success', dir, name,
+      label: 'Full model on this computer',
+      detail: detail || 'Downloaded from the pod and verified.',
+    };
+  }
+  if (run.status === 'downloading' || run.dense_fetch_active) {
+    return {
+      status, available: false, tone: 'info', dir, name,
+      label: 'Downloading the full model…',
+      detail: String(run.phase_detail || '')
+        || 'The pod is kept until the file here is complete and verified.',
+    };
+  }
+  return {
+    status, available: false, tone: ended ? 'warning' : 'info', dir, name,
+    label: ended ? 'Full model not downloaded' : 'Full model not downloaded yet',
+    detail: detail || (ended
+      ? 'The pod is kept so it can be fetched again. Free disk space if that is what stopped it.'
+      : 'It is downloaded at the end of the run, and the pod is kept until it is verified.'),
+  };
+}
+
+/** The Hugging Face BACKUP of a run that is delivered here first.
+ * A different question from fullTransformerArtifactView, which describes the
+ * artifact itself: once the model is on this computer, the Hub copy is only
+ * about being able to continue this run later, and a failed backup must not
+ * read as a lost model. Returns null for a hub-only run — that one keeps the
+ * original view, unchanged. */
+export function denseHubBackupView(run = {}) {
+  if (!denseDeliversLocally(run) || !denseDeliversToHub(run)) return null;
+  const state = String(run.hub_backup_status || '').trim().toLowerCase();
+  const detail = String(run.hub_backup_detail || '').trim();
+  const href = /^https:\/\/huggingface\.co\//i.test(String(run.hf_url || '').trim())
+    ? String(run.hf_url).trim() : null;
+  if (state === 'done') {
+    return {
+      state, tone: 'success', href,
+      label: 'Hugging Face backup made',
+      detail: detail || 'The full-precision master was uploaded from the pod, so '
+        + 'this run can be continued later.',
+    };
+  }
+  if (state === 'failed' || state === 'skipped') {
+    return {
+      state, tone: 'warning', href,
+      label: 'No Hugging Face backup',
+      detail: detail || 'The backup copy was not made. The model itself is on '
+        + 'this computer; without a Hub copy this run cannot be continued later.',
+    };
+  }
+  if (String(run.local_artifact_status || '').toLowerCase() === 'available') {
+    return { state, tone: 'info', href, label: 'Hugging Face backup pending',
+      detail: detail || 'The model is on this computer; the backup copy has not '
+        + 'been reported yet.' };
+  }
+  return null;      // nothing to say before the local copy even landed
+}
+
+/** Why a full model cannot be continued, or null when it can.
+ * The Hub copy is the only source a pod can be given: a ~26 GB master cannot be
+ * uploaded to it from here. */
+export function denseResumeBlocker(run = {}) {
+  if (!isFullTransformerRun(run)) return null;
+  if ((run.resume_steps || []).length) return null;
+  if (!denseDeliversToHub(run)) {
+    return 'This full model has no Hugging Face copy, so it cannot be continued: '
+      + 'a pod cannot be handed the 26 GB file on this computer. Choose the '
+      + '“This computer + Hugging Face” delivery to keep future runs resumable.';
+  }
+  return 'This run has no verified Hugging Face copy to continue from yet.';
+}
+
+/** Fetching to this computer is the recovery twin of “Verify Hugging Face
+ * delivery”: it applies to a KEPT pod whose local copy is still missing. */
+export function canFetchDenseLocally(run = {}) {
+  return isFullTransformerRun(run) && run.can_fetch_local === true;
+}
+
 /** Delivery verification is safe only for the recovery state whose pod was
  * deliberately kept alive. Rechecking a live/finished run could otherwise race
  * the monitor and tear down an instance that is still uploading. */
@@ -187,6 +388,9 @@ export function canRecheckFullTransformerDelivery(run = {}) {
   const cleanupPending = artifactStatus === 'available'
     && String(run.artifact_cleanup_status || '').trim().toLowerCase() !== 'complete';
   return isFullTransformerRun(run)
+    // A run delivered to this computer only has no Hub delivery to verify —
+    // offering the button would be a dead end with a confusing name.
+    && denseDeliversToHub(run)
     && run.status === 'error_pod_kept'
     && (artifactStatus !== 'available' || cleanupPending);
 }

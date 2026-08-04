@@ -40,6 +40,15 @@ this family). Both bases are *gated* on Hugging Face: accept the license of
 testing (Test Studio) is coming — until then, test your Klein LoRA in your own
 ComfyUI.
 
+**Anima note (the one family that takes BOTH caption styles):** Anima is an anime
+model with **hybrid prompting** — its model card documents *booru tags* and *natural
+language* as equally supported, which its LLM text encoder is what makes possible. So
+this is the family where the "match the style" rule below does **not** apply: caption
+in prose, caption in booru tags, or keep an existing dataset as it is — the app will
+not flag either as a mismatch, and you never have to force the launch. Prose is only
+the preselected default. It trains on the open `Anima-Base-v1.0-Diffusers` (no gated
+download) and is **local-only** for now.
+
 ---
 
 ## 2. How many images, and which ones
@@ -98,7 +107,50 @@ Concretely:
    captions under ~8 words are too weak to isolate the identity.
 5. **Match the style to the family.** Prose for Z-Image and Krea; booru tags for
    SDXL booru-native checkpoints. The app blocks a mismatch for a reason —
-   a prose-captioned SDXL LoRA produces disjointed images.
+   a prose-captioned SDXL LoRA produces disjointed images. **Anima is the
+   exception:** it reads both forms natively, so neither is ever blocked there
+   (see the Anima note above).
+
+   ⚠️ **Concept datasets cannot be captioned in booru tags at all** (the concept
+   captioner only writes prose). A Concept dataset on a booru-native SDXL
+   checkpoint will therefore always be stopped by the caption-style check: train
+   the concept on a prose family instead, or force the launch knowing the cost.
+
+**Caption length.** ⚙️ *Options* on the Captions panel carries a **Caption length**
+preset — *Standard* (the prompt untouched), *Concise* (aims for one short sentence,
+~20–30 words) or *Detailed* (several sentences). It is a **target the vision model
+follows loosely**, not a hard cap: expect a spread around it, not a word count. Pick
+*Concise* when detailed captions keep describing the identity you want bound to the
+trigger, *Detailed* when you want scene, outfit and lighting to stay independently
+promptable.
+
+What that looked like when measured — 18 real portrait photos, the shipped default
+vision model (`huihui_ai/qwen3-vl-abliterated:8b-instruct`), the plain descriptive
+prompt, one pass per preset:
+
+| Preset | Median | Range |
+|---|---|---|
+| Concise | 24.5 words | 18–30 |
+| Standard | 87.5 words | 65–112 |
+| Detailed | 126 words | 106–152 |
+
+Your numbers will differ — another vision model, JoyCaption, or a different kind of
+image all move them. Treat the presets as *shorter / as-is / longer*, not as a
+contract on a word count.
+
+Two more things worth knowing:
+
+- **Order.** The prompt is built as: the base prompt with its omission rules, then the
+  vocabulary register, then the length preset, then your free **Extra instructions**
+  last — so a hand-written steer that contradicts a preset is what the model reads
+  most recently and wins. The identity/concept leak cleaners run after all of it
+  regardless, so no wording here can reintroduce a banned term.
+- **Concise is not the "short" of long + short captions.** Dual captions derive a
+  short variant *from* the stored long caption into its own field; the length preset
+  changes the long caption itself. They are separate axes and compose freely.
+- Concise stays **prose** on purpose (never a comma-separated tag list), so a Concise
+  dataset still passes the caption-style check for prose-native families instead of
+  being mistaken for booru tags at launch.
 
 **Concept datasets** (training a *thing/style/act*, not a person) invert the rule:
 describe everything **except the concept** — the concept is what must bind to the
@@ -189,7 +241,7 @@ The app runs these checks when you hit Train — here's the list to self-check e
 - [ ] Framing balanced — not 100% face shots (some bust/body/back)
 - [ ] Every kept image captioned *(strongly recommended — a blank caption won't block the launch, it just asks you to confirm "train anyway")*
 - [ ] **Zero identity leaks** (no hair/face/skin words — the leak badge shows 0)
-- [ ] Captions varied, ≥ 8 words, style matches the family (prose vs booru)
+- [ ] Captions varied, ≥ 8 words, style matches the family (prose vs booru — Anima takes either)
 - [ ] Near-duplicate pairs resolved (keep one of each)
 - [ ] Body fidelity: if ON, actual full-body shots exist
 
@@ -225,25 +277,80 @@ best one**. Later checkpoints know the identity better but obey prompts worse.
    expression/angle regardless of prompt, outfits from the dataset bleeding in.
 4. Save the winning settings (★) — they're reused as the dataset's defaults.
 
-### Compare LoRAs — or combine them
+### Test several prompts in one launch
+
+Under the prompt box is the history of the prompts you have saved, with a
+thumbnail of the image you liked best for each. Clicking a card loads it into the
+field, as before. **Ticking its box adds it to a batch**: the panel counts what is
+selected, the button says how many prompts it is about to run, and one launch
+renders them all — same checkpoints, same settings, **same seed**, which is what
+makes two prompts comparable rather than two unrelated pictures.
+
+It is one run, not several: the images queue up and the GPU works through them by
+itself. Tick nothing and the screen behaves exactly as it always has, running the
+prompt in the field.
+
+**There is no limit on how many you tick.** What there is instead is the price,
+shown before you click: the panel counts every generation the run will queue and
+estimates how long it takes **at the pace your machine has actually been running
+at** — measured from your own recent test generations, not assumed. Past about an
+hour it asks once whether you meant it. The queue is serial, so you can stop it at
+any point and everything already generated is kept.
+
+The same tick boxes are in **🎨 Generate from the board** on the ◉ LoRA Canvas,
+because both screens show the same prompt history.
+
+### Compare LoRAs — or blend them
 
 Check two or more LoRAs and Studio asks what you want to do with them:
 
 - **⚖ Compare** (the default) tests each LoRA **on its own**, one column per LoRA,
   swept across the strengths you picked. This is what you want to answer "which of
   these is better".
-- **🧬 Combine** loads them **together in the same image**, each at its own weight,
+- **🧬 Blend** loads them **together in the same image**, each at its own weight,
   and injects **every trigger word** into the prompt for you. This is what you want
-  to answer "do these two work together" — a character plus a style, or two of your
-  own characters in one shot.
+  to answer "do these two work together" — a character plus a style, or a character
+  plus a concept.
 
-In Combine mode the strength sweep disappears: each LoRA already carries its own
+> This mode was called **🧬 Combine** until August 2026. Only the name changed;
+> the ◉ LoRA Canvas offers the very same thing from the board, and calling it two
+> different things was a needless thing to learn twice.
+
+**What blending two characters actually gives you** is a *hybrid* — one person who
+is neither of the two, not both of them side by side in one shot. That is a real
+and deliberate use, but if you expected "my two characters together", this is not
+it. The reliable pairings are **character + style** and **character + concept**.
+
+In Blend mode the strength sweep disappears: each LoRA already carries its own
 weight, so the run is one configuration instead of a grid. Start both around
 0.7-0.9 — two LoRAs at 1.0 usually fight each other, and the one you care about
-most should be the heavier of the two. Result tiles from a stack carry a **🧬 +N**
-badge naming what was loaded alongside.
+most should be the heavier of the two. Result tiles from a stack carry a **🧬**
+badge naming the exact weights that made them.
 
-**One family per run, always.** A Krea LoRA and an SDXL LoRA cannot be combined:
+**Steps and CFG are set in the same panel, in both modes.** They are render
+settings, not LoRA settings, so they stay available when the strength sweep
+disappears in Blend — and like every other axis, ticking two values renders both
+(the cell counter shows what that costs before you launch). SDXL also exposes its
+second pass there.
+
+**Trying several weights at once.** Under each LoRA's slider is a row of weight
+boxes. Tick two on one LoRA and two on the other, and the launch renders **all
+four combinations** in a single run — the search you would otherwise do by
+launching, looking, moving a slider and launching again. Each image is labelled
+with its own pair, and the stack view lines the combinations up side by side so
+you can pick the one that works and save its weights with ★.
+
+Tick nothing and the slider governs, exactly as before the boxes existed; the
+slider is also how you use a weight that is not on the grid. Tick one box and you
+get one configuration — one image — like any other blend.
+
+The count is spelled out before you launch ("4 weight combinations → 4 images,
+about 1 min"), and past 24 images it turns amber and says so. It never refuses:
+the queue is serial and it is your machine. Two LoRAs at four weights each is 16
+images — the multiplication is quick, which is exactly why the panel does it for
+you.
+
+**One family per run, always.** A Krea LoRA and an SDXL LoRA cannot be blended:
 they need different base models and different workflows. The picker greys out the
 other families as soon as you check one, and a run that somehow mixes them is
 refused with both family names in the message.
@@ -425,6 +532,225 @@ repeats them on screen rather than hiding them:
 The panel reads the same pool the Composition bar counts: everything that is not
 rejected and not failed. It also tells you how many images have **no shot type
 yet**, which is the one thing the bar above silently drops.
+
+## 10. Full-model recipe — what you can change
+
+Full-model (dense) training is a different animal from a LoRA: instead of a small
+adapter, it rewrites all 12B weights of Krea 2 Raw. That only fits on one 80 GB
+card under a specific geometry, so most of the recipe is locked — and the panel
+now says which parts and why.
+
+**Locked, and not negotiable**
+
+| Locked | Why |
+| --- | --- |
+| Batch size 1, bf16 | The 80 GB budget has no room for more. |
+| Adafactor | Adam-family optimizer states would not fit alongside the weights. |
+| Gradient checkpointing, cached latents + text embeddings | Same reason — turn any of them off and the run dies out of memory, an hour in, on a rented GPU. |
+
+**Editable, because these change the RESULT rather than whether it fits**
+
+| Setting | Default | Range | Why you would move it |
+| --- | --- | --- | --- |
+| Steps | adaptive | ≥ 500 | Longer runs on larger sets. |
+| Preview prompts | generic per kind | up to 8 lines | The defaults describe nobody. These images are the only way to judge a run *while it is still costing money* — make them look like your dataset. `{trigger}` marks where the subject goes. |
+| Learning rate | 1e-6 | 1e-7 – 5e-6 | Lower if the model drifts off the base too fast; higher only with evidence. |
+| Resolution | 1024 px | 768 or 1024 | 768 trains faster and cheaper, at lower fidelity. |
+| Checkpoint every / keep | 250 steps / keep 1 | ≥ 100 steps / keep 1-3 | More kept checkpoints means more sweet-spot candidates — and each one is about 26 GB of PRIVATE Hugging Face storage. The panel states the total before you launch; the launch itself refuses (confirmably) when it plainly will not fit. |
+| Images per step | 1 | 1, 2, 4, 8 | Batch size is locked at 1, so by default each step learns from a **single image** — over a set of several thousand, that is a very noisy estimate of the right direction. This averages several images into one update instead. It needs no extra VRAM (the images go through one at a time); it needs TIME. |
+| Learning-rate schedule | constant | constant · warmup · cosine | Constant is what shipped. Warming up eases the first steps rather than hitting a 12B model at full rate from step 1. Cosine fades the rate to zero by the last step, which settles fine detail late instead of still shoving the weights around at the end. |
+| Warm up over | 100 steps | 10 - 1000 | Only used by the warmup schedule. |
+| Noise schedule | linear | linear · sigmoid · weighted | Which noise levels the run trains on. `sigmoid` concentrates on the middle of the range; `weighted` keeps the linear draw but weights the loss on a bell curve. There is no settled consensus for Krea 2 — linear is what every validated run so far used, so it stays the default. |
+
+**"Images per step" is the one setting here that spends money.** Everything else
+changes what the run produces at the same price. This one multiplies the run:
+4 images per step means about 4× the wall-clock and about 4× the bill on a GPU
+rented by the hour. The card prints the multiplier next to the control and turns
+it amber above 1, so the number is visible *before* you launch rather than on an
+invoice. What it does **not** change: the number of checkpoints, their cadence,
+or the Hugging Face storage the run needs — `steps` counts optimizer steps, so
+raising this changes how much each step learned from, not how many files land.
+
+**Two settings you may expect, and why they are not offered**
+
+Both exist in AI Toolkit. Both would break *this* model, so the card does not
+show them:
+
+- **EMA** (averaging the weights as training goes) keeps a second copy of every
+  trained parameter on the GPU, plus a third whenever it saves. On a LoRA that is
+  a few hundred megabytes. On a 12B full model it is roughly +26 GB, then +26 GB
+  again at the first checkpoint, on top of an unquantized model and its
+  gradients — the run would die at its first save. EMA is still available for
+  **LoRA** training, where it costs almost nothing.
+- **min-SNR weighting** needs a signal-to-noise table that flow-matching models
+  like Krea 2 simply do not have. Worse, the trainer's attempt to build that
+  table fails *silently* at startup, so the job does not refuse when you launch
+  it — it crashes inside the loss computation an hour later, on a pod you are
+  paying for. Refusing it up front is the cheaper failure.
+
+The same reasoning removes `shift`-style noise schedules from the full-model
+list: the trainer derives their shift from a token count that assumes a field
+Krea 2's denoiser names differently, so the value silently comes out four times
+too big. A mis-shifted schedule looks like a tuned run and is not one.
+
+> **Which AI Toolkit is this about?** LoRA training uses the AI Toolkit installed
+> on *your* machine — it changes whenever you update it. Full-model training is
+> cloud-only and uses the AI Toolkit baked into the rented pod's image, which is
+> pinned. They are different codebases at different dates. Every statement above
+> was checked against the pinned one, and each run now records the image the pod
+> actually booted, so a run can say for itself which trainer produced its weights.
+
+### Where a finished run lands, and why in that order
+
+A finished full model is brought **to this computer first** — into the checkpoint
+folder (Settings ▸ Storage) — and the pod is destroyed **only** once that file is
+proven: its byte count matches what the pod advertised, and its safetensors
+header re-reads and declares tensors. Nothing is pushed to Hugging Face *while
+the run trains*, which is the whole point: a full private quota used to arrive as
+a `403` at step 2750 of 3000 and end a paid run. Once the local copy exists, the
+master is uploaded to your private repository as a **backup**, and that upload is
+allowed to fail — it costs the ability to *continue* this model later, nothing
+more.
+
+Three deliveries, in Settings ▸ Storage ▸ **Full-model delivery**:
+
+| Delivery | What you get | What it costs |
+| --- | --- | --- |
+| **This computer, then a Hugging Face backup** (default) | The model here, plus a Hub copy that keeps the run resumable. | The Hub copy still needs private storage. |
+| **This computer only** | Nothing touches your Hugging Face quota. | The run can **not** be continued later. |
+| **Hugging Face only** | The behaviour of runs made before this existed. | A full quota can end the run itself. |
+
+If anything interrupts the download — a cut stream, a full drive, a cancelled
+transfer — the run ends as **error_pod_kept** with the machine alive, and the
+Runs page offers **Fetch to this computer**, which resumes from the byte it
+stopped at. A launch also refuses (confirmably) when the checkpoint drive plainly
+has no room for what is coming.
+
+### Continuing a full model
+
+▶ Continue works on a full model, from **its Hugging Face copy**: the fresh pod
+downloads that checkpoint itself over a datacenter link, drops it into its job
+folder, and ai-toolkit resumes from the step written in the file — so a run that
+stopped at 3000 continues to 4000 instead of paying for the first 3000 again.
+
+The copy **on this computer** cannot be used for that, and the app says so rather
+than trying: the only channel that puts a file on a pod builds its whole request
+in memory, which a 26 GB file cannot survive. That is why the default delivery
+keeps a Hub copy — it is what makes a full model resumable at all.
+
+### The two files a finished run delivers
+
+A dense run produces a ~26 GB **bf16 master**. Nobody generates with a file that
+size, so the app quantizes it **on the pod** and delivers a **~10 GB fp8 export**
+next to it:
+
+- **the fp8 file is the one to download for ComfyUI.** It is a scaled fp8
+  checkpoint (per-tensor `float8_e4m3fn` weights with their scales) and loads
+  with the standard *Load Diffusion Model* node, no extra setup;
+- **the bf16 master is the only one that can be trained again**, merged, or
+  re-quantized differently. fp8 is a lossy, one-way export. *Keep the bf16
+  master* is ON by default for exactly that reason — turning it off halves your
+  storage and closes that door permanently.
+
+If the export fails, the run is still a success: the master is delivered either
+way, and the panel says so rather than reporting a failure. Only the master is
+ever backed up to Hugging Face — the fp8 twin is regenerated from it in seconds,
+and pushing both would eat the private quota twice as fast.
+
+### Quantizing a model you already have
+
+The same conversion is available by hand, in **⚙️ Full-model recipe → Quantize an
+existing model to fp8**: give it the full path to any full-precision
+`.safetensors` checkpoint on this machine — a 26 GB model you downloaded from
+Hugging Face, a dense checkpoint from an earlier run — and it writes
+`<name>_fp8.safetensors` **next to it**. The source is never modified, and an
+existing output is never silently overwritten.
+
+- It runs on the **CPU**, not the GPU: the work is an elementwise cast plus one
+  reduction per tensor (measured ~1.2 GB/s here, so a 26 GB file is bound by your
+  disk, not by arithmetic). Nothing competes with ComfyUI or a training run.
+- It runs in a **separate Python** — the one that has `torch` and `safetensors`
+  (the app installs without them; torch is gigabytes). Whether that environment
+  can actually do the work is checked *while the plan is drawn*: one that cannot
+  disables the button and names what to install, rather than failing after the
+  click or, worse, after the download.
+- One at a time, app-wide, and it checks free space before it reads a byte.
+- It **refuses a file that is already quantized** — quantizing twice only loses
+  more precision — and refuses a LoRA or adapter, which has nothing large enough
+  to shrink.
+- When it finishes it **re-opens the file it just wrote** and checks the marker,
+  the per-tensor scales and the payload dtype, so a bad conversion is reported
+  now rather than at generation time.
+
+> **This is not ai-toolkit's `quantize`.** The `quantize` / memory options in
+> Advanced training shrink the model *in memory while it loads*, so a smaller
+> card can train something that would not otherwise fit. They write nothing: the
+> saved checkpoint is still full precision. This feature produces the **file**.
+
+### ✨ Quantize to fp8 — one click, no path to find
+
+A run delivered before the automatic export existed leaves you with a 26 GB file
+in a private repo and no fp8 twin, and until now this block could not help: it
+asked for a path on your disk, and that master has none — the dense lane never
+downloads it. So the block now aims at the model **your run delivered**, and
+does the whole chain with nothing to type: fetch the master, convert it, and
+leave the fp8 file in ComfyUI's own models folder, ready to load.
+
+Click **✨ Quantize to fp8** once and it tells you what it is about to do; the
+conversion only starts on the second click.
+
+- **Which checkpoint it takes, by name.** A dense repo usually holds the final
+  save *and* several ~26 GB step snapshots whose names differ by a number. One
+  rule decides — the **final save** wins, and without one the **highest step**
+  does — and it is the same rule that stamped the file this card lists, so what
+  you read and what runs can never be two different files.
+- **Where the file lands, spelled out.** `models/diffusion_models` for a dense
+  transformer, `models/checkpoints` for an SDXL-style full checkpoint, honouring
+  an `extra_model_paths.yaml` root exactly as a LoRA deploy does. With ComfyUI
+  not configured it falls back to the app's own `data/models/…` and **says so** —
+  it never pretends to have put the file where ComfyUI looks.
+- **What it costs in disk, before it starts.** What is still to download, the
+  fp8 file's own ceiling, and 2 GB of working headroom — compared against the
+  free space of the volume that *really* holds that folder (a ComfyUI models
+  folder is very often a junction onto another drive). Not enough is a refusal
+  that writes out every term, and offers to write the file to another folder
+  rather than ending there. Whatever this forecast accepts, the conversion does
+  not then refuse.
+- **It is a real job.** Progress in gigabytes while the master comes down, then
+  per-tensor while it converts, a **Stop** button, and resumption from where it
+  stopped — stopping keeps what already arrived. The job also survives leaving
+  the page: come back and the card shows the same run.
+- **Afterwards, the master is kept by default.** It is the only file you can
+  train from again, merge, or re-quantize. Deleting it is one radio button away,
+  with its size written on it, and it only ever happens *after* the fp8 file has
+  been re-opened and verified.
+- It refuses a file that is **already quantized**, refuses a LoRA/adapter, and
+  **never overwrites** an existing output.
+
+**The path field is still there, as the exception.** A file nothing in the app
+points at — a checkpoint someone shared, a model you downloaded yourself — is
+typed in as before, and takes the same route: same refusals, same disk check,
+same destination, stated. When you have set **Custom weights…**, that path
+pre-fills it, so there is nothing to type there either.
+
+### Testing a full model: it is a RAW checkpoint
+
+The artifact is **undistilled**. Krea 2 Turbo-style settings — CFG 1 and a
+handful of steps — produce a blurry sketch on it, which reads as "the training
+failed" when nothing failed at all. Use the same settings the run previewed
+with: **CFG ~4 (3.5-5) and 20-30 steps**. The Test Studio now pre-fills those
+automatically when the selected base looks like a Raw / full / fp8 checkpoint.
+
+### Why a quantized checkpoint is refused as a training base
+
+Picking a community fp8/int8 export as **Custom weights** is refused with
+*"This is an inference-only quantized export — training needs the bf16/fp16
+version of this model."* Those files (about 10 GB instead of 26 GB) are repacks
+made for generation: the weights no longer carry the precision a gradient step
+needs. The check reads a few kilobytes of file header — the quantization
+markers and the tensor dtypes — so it costs nothing and fires the moment you
+pick the file, not an hour into a paid run. A file whose header cannot be read
+is let through: the app refuses what it can prove, never what it merely suspects.
 
 ---
 

@@ -1071,8 +1071,9 @@ def dataset_caption_cancel(dataset_id):
 
 @bp.get('/dataset/<int:dataset_id>/caption/options')
 def dataset_caption_options_get(dataset_id):
-    """Per-dataset caption method overrides {backend, ollama_model, instructions} for the
-    ⚙️ Options popover. Empty values mean "follow the global default"."""
+    """Per-dataset caption method overrides {backend, ollama_model, vocabulary, length,
+    instructions} for the ⚙️ Options popover. Empty values mean "follow the global
+    default" (for length, the standard prompt with nothing appended)."""
     ds = svc.get_dataset(LOCAL_USER, dataset_id)
     if not ds:
         return jsonify({'error': 'not found'}), 404
@@ -1120,7 +1121,8 @@ def dataset_image_caption_preview(dataset_id, image_id):
             result = svc.preview_caption(
                 LOCAL_USER, dataset_id, image_id,
                 backend=data.get('backend'), ollama_model=data.get('ollama_model', ''),
-                vocabulary=data.get('vocabulary'), instructions=data.get('instructions'),
+                vocabulary=data.get('vocabulary'), length=data.get('length'),
+                instructions=data.get('instructions'),
                 should_cancel=lambda: dataset_activity.cancel_requested(dataset_id))
     except Exception as e:
         return _map_error(e)
@@ -1445,6 +1447,37 @@ def dataset_image_reimprove(image_id):
         return gate
     try:
         result = svc.reimprove_image(LOCAL_USER, image_id)
+    except Exception as e:
+        engine_error = _improve_engine_error(e)
+        if engine_error:
+            return engine_error
+        return _map_error(e)
+    if result is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'ok': True, **result})
+
+
+@bp.post('/canvas/image/<int:image_id>/improve')
+def canvas_image_improve(image_id):
+    """✨ Upscale & improve ONE image of the ◉ Canvas board / a checkpoint gallery.
+
+    Deliberately its own route rather than a reuse of
+    `/dataset/image/<id>/improve`: `image_id` here is a `lora_test_image.id`
+    (that is what `canvas_image_node.image_id` stores) while the dataset route
+    resolves a `FaceDatasetImage`. The two tables have INDEPENDENT id spaces, so
+    sending a board id to the other route would not 404 — it would find a real,
+    unrelated dataset image and improve THAT one, silently.
+
+    Same body and same answers as its dataset sibling: `engine` ('klein' |
+    'seedvr2', absent = the improve.engine setting), and the same 409 that offers
+    to install a missing engine, because both go through the one preflight."""
+    gate = _require_no_stalled_comfyui()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    engine = (data.get('engine') or '').strip() or None
+    try:
+        result = lts.improve_canvas_image(LOCAL_USER, image_id, engine=engine)
     except Exception as e:
         engine_error = _improve_engine_error(e)
         if engine_error:
@@ -1820,6 +1853,9 @@ def lora_test_run(dataset_id):
         res = lts.create_run(LOCAL_USER, dataset_id,
                              d.get('checkpoints') or [], d.get('strengths') or [],
                              seed=d.get('seed'), prompt=d.get('prompt'),
+                             # 📝 Lot : une passe par prompt coché dans
+                             # l'historique. Absent → le prompt du champ, seul.
+                             prompts=d.get('prompts'),
                              z_model=d.get('z_model'), z_models=d.get('z_models'),
                              aspects=d.get('aspects'),
                              cfgs=d.get('cfgs'), steps_list=d.get('steps'),

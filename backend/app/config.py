@@ -53,7 +53,18 @@ DEFAULTS = {
     # remote devices (access_token is then generated + persisted here so it
     # survives restarts and is copyable from Settings). Loopback never needs it.
     'server': {'host': '127.0.0.1', 'port': 5050, 'require_token': False, 'access_token': ''},
-    'paths': {'dataset_images_root': ''},                      # '' -> DATA_DIR/datasets
+    # Every path here means "'' = the default under DATA_DIR". Storing the
+    # resolved path instead would freeze today's disk into config.json and make
+    # a later DATA_DIR move silently wrong, so blank stays blank.
+    #   cloud_runs_dir     working area of a cloud run (dataset copy, samples,
+    #                      logs) — big, and safe to throw away once a run ended.
+    #   checkpoints_dir    the DURABLE checkpoint store. Deliberately NOT under
+    #                      cloud_runs_dir: the staging cleanup used to be the
+    #                      only copy of a never-deployed .safetensors, and
+    #                      emptying the trash after it destroyed weights.
+    'paths': {'dataset_images_root': '',                       # '' -> DATA_DIR/datasets
+              'cloud_runs_dir': '',                            # '' -> DATA_DIR/cloud_runs
+              'checkpoints_dir': ''},                          # '' -> DATA_DIR/checkpoints
     'comfyui': {'api_url': 'http://127.0.0.1:8188', 'base_dir': '',
                 'output_dir': '', 'input_dir': '', 'models_dir': '', 'loras_dir': '',
                 # setup_skipped (default False): the user consciously chose "continue
@@ -170,7 +181,11 @@ DEFAULTS = {
         # to a raw-image launch using `image`/`onstart` below.
         'template_hash': '471ed5903d8cdb8e63b0d0e50f6cd519',
         'ui_port': 18675,              # container port the UI is reachable on (Caddy proxy)
-        'image': 'vastai/ostris-ai-toolkit:4625406-2026-07-12-cuda-12.9',  # raw-image fallback only
+        # Raw-image fallback only — BUT the tag also names the ai-toolkit commit
+        # the dense (full-transformer) recipe's supported/refused verdicts were
+        # read against. Bumping it means a different trainer: re-read the lever
+        # comments in services/lora_training.py first (a test enforces the pin).
+        'image': 'vastai/ostris-ai-toolkit:4625406-2026-07-12-cuda-12.9',
         'max_price_per_hour': 0.80,    # background safety cap on offer price, $/h
         'offer_scan_limit': 100,       # offers fetched when listing GPU speed tiers
         'pod_overhead_minutes': 35,    # boot+model download+quantize (measured ~40 min live), in cost estimates
@@ -236,6 +251,36 @@ DEFAULTS = {
             # recovery instead of declaring success or destroying the only copy.
             'verification_attempts': 3,
             'verification_retry_seconds': 5,
+            # Private Hugging Face storage the delivery needs, checked BEFORE a
+            # pod is rented (run #146 died at step 2750/3000 on a 403 "private
+            # repository storage limit reached"). 0 = infer the allowance from
+            # the plan documented by Hugging Face (100 GB free / 1 TB PRO) —
+            # an ESTIMATE: the Hub publishes no quota endpoint, and the observed
+            # refusal came well below the documented free figure. Set the real
+            # number here to make the pre-check exact. Never a hard lock: the
+            # refusal is confirmable ("Train anyway").
+            'private_storage_limit_gb': 0,
+            # Headroom on top of checkpoint × saves kept (model card, licence,
+            # a push that lands exactly on the ceiling still fails).
+            'storage_margin_gb': 20,
+            # 0 = size one dense checkpoint from what past runs really delivered
+            # (their persisted Hub integrity proof), else ~26 GB.
+            'checkpoint_size_gb': 0,
+            # Where a full model is delivered: 'both' (default) downloads it to
+            # this computer FIRST, proves it, and only then backs the master up
+            # to the private Hugging Face repository; 'local' skips the backup
+            # (and with it the ability to continue that run later); 'hub' is the
+            # historical Hugging-Face-only delivery. The order is the point: a
+            # full private quota can no longer end a training, because nothing
+            # is pushed while it trains.
+            'delivery': 'both',
+            # Free space to leave on the checkpoint volume on top of the
+            # delivery itself, checked before the pod is rented.
+            'local_disk_margin_gb': 15,
+            # Ceilings for the two pod-side Hugging Face transfers (backing the
+            # master up, and pulling it back when continuing a run).
+            'hub_push_budget_seconds': 3600,
+            'hub_fetch_budget_seconds': 3600,
         },
         'onstart': '',                 # raw-image fallback: optional startup command
     },
@@ -288,6 +333,12 @@ DEFAULTS = {
     #   "never stay warm": every distinct query pays the ~8 s load, which is the
     #   right trade on a memory-tight machine.
     'bank_scoring': {'python': '', 'text_search_idle_minutes': 10},
+    # fp8 quantization runs `fp8_export.py` in a SUBPROCESS, because it needs
+    # torch + safetensors and this app deliberately installs without them
+    # (gigabytes). Empty -> the same interpreter ✨ Score uses, then ai-toolkit's,
+    # then the app's own. Never imported in-process: doing so shipped a feature
+    # that could not run at all on a real install.
+    'quantize': {'python': ''},
     # Watermark inpainting (simple-lama-inpainting, extra ML). Dedicated key so a
     # user can override it, but defaults empty -> reuse the same ML interpreter as
     # rembg/insightface (masks.python) then sys.executable. Never imported in-process.
@@ -296,6 +347,28 @@ DEFAULTS = {
     # engine). A persisted user preference (Settings ▸ Watermark inpainting AND the
     # batch Clean bar both edit it); the review lightbox can still override it per image.
     'watermark': {'python': '', 'device': 'auto', 'allow_crop': True},  # auto|cuda|cpu
+    # 🚩 Dedicated watermark DETECTOR (optional extra: a SigLIP2 classifier that
+    # ranks + a Grounding DINO pass that locates). When installed, the Find pass
+    # uses it instead of asking the vision model image by image; when not, nothing
+    # changes and the vision model still does the work.
+    # python: its interpreter. Empty = reuse the bank-scoring environment (which
+    #   already has torch + transformers) and then the app's own — so a normal
+    #   install simply probes ✗ and keeps the vision-model path.
+    # models_root: where the ~0.9 GB of weights live. Empty = data/models/watermark_detect.
+    # threshold: the classifier score at or above which an image is FLAGGED.
+    #   0.94 is MEASURED, not a guess, and it is nowhere near the 0.5 a
+    #   probability normally implies: this model's scores are compressed hard
+    #   against 1, so on a 110-image hand-labelled sample of a real 29 759-image
+    #   bank, 0.5 flagged 52 of the 55 CLEAN images while 0.94 flagged none of
+    #   them and still caught 54 of the 55 marked ones. Raise it toward 0.96 to
+    #   miss more rather than crop anything by mistake; lower it toward 0.92 to
+    #   catch the faintest marks and hand-check a few clean images.
+    # device: auto|cuda|cpu, same meaning as the inpainting device.
+    # locate: run the second (localisation) model on flagged images. Off = images
+    #   are flagged with NO box, which the crop/inpaint levels cannot route on —
+    #   only worth it to save time on a bank you intend to filter, not clean.
+    'watermark_detect': {'python': '', 'models_root': '', 'threshold': 0.94,
+                         'device': 'auto', 'locate': True},
     # consistency_strength: the dx8152 LoRA anchors STRUCTURE (composition/
     # background), not the face — its own guide says start at 0.5 and that
     # 0.8-1.0 "can prevent edits from applying". 0.9 made every variation a
@@ -441,6 +514,11 @@ DEFAULTS = {
         # first build in the SEEDVR2 folder. Set it to a filename to pin one (a
         # 7B build you dropped in yourself resolves exactly the same way).
         'model': '',
+        # Same contract for the VAE: blank = the canonical ema_vae_fp16, else the
+        # first file in the folder whose name says VAE. Set it to a filename when
+        # yours is named something the heuristic cannot recognise — a pin is
+        # honoured against the whole folder, which is the only reason it exists.
+        'vae': '',
         # Target for the SHORT edge in pixels; the long edge follows the source
         # aspect. 1080 is the node's own default and a sane dataset target — LoRA
         # training buckets rarely exceed it, so going higher mostly costs VRAM.
@@ -453,6 +531,25 @@ DEFAULTS = {
         # tone better on heavily degraded sources. Colour fidelity is the whole
         # reason this engine exists, so this is deliberately exposed.
         'color_correction': 'lab',
+        # How the high-resolution (tiled) lane is chosen, when the TTP node pack
+        # is installed. 'auto' (default) tiles when tiling helps — past the size
+        # the model is comfortable at, or when the frame would not fit. Tiling
+        # preserves high-frequency detail, not just VRAM (SurpassHR's
+        # side-by-side, GitHub #32); the old VRAM-only rule meant the bigger
+        # your card the less often you got the better picture, and it is gone.
+        # 'always' tiles whenever there is more than one tile to make; 'never'
+        # stays full-frame. Without the pack this has no effect.
+        'tiling': 'auto',
+        # Side of one tile, in pixels — THE VRAM lever of this engine. 1024 is
+        # the contributed value and a good one on a big card; on 8 GB, 768 or
+        # 512 is the difference between a 4K upscale and an out-of-memory, at
+        # the cost of more seams. It also sizes the VAE's tiled encode/decode,
+        # so it helps on the full-frame lane too, tiling pack or not.
+        'tile_px': 1024,
+        # Output short edge past which 'auto' tiles. 0 (default) = derive it from
+        # the tile size (1.5x = the shipped 1536 at a 1024 tile) so the crossover
+        # follows the tile. A positive value places it by hand.
+        'tile_threshold': 0,
         # Transformer blocks offloaded to system RAM during inference. 0 = none
         # (fastest). Raise it to fit a bigger build on a smaller card; it trades
         # speed for VRAM headroom, it does not change the result.
@@ -966,6 +1063,30 @@ def dataset_images_root() -> Path:
     p = get('paths.dataset_images_root') or ''
     root = Path(p) if p else _data_dir() / 'datasets'
     root.mkdir(parents=True, exist_ok=True)
+    return root
+
+def cloud_runs_root(create=True) -> Path:
+    """Working area of cloud training runs (one ``run_<id>/`` per run: the
+    exported dataset copy, the sample images and the mirrored training log).
+    Relocatable — this is the directory that grows to tens of GB. It no longer
+    holds the only copy of anything: checkpoints live in checkpoints_root()."""
+    p = get('paths.cloud_runs_dir') or ''
+    root = Path(p) if p else _data_dir() / 'cloud_runs'
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+def checkpoints_root(create=True) -> Path:
+    """The durable checkpoint store — one ``run_<id>/`` per cloud run holding the
+    ``.safetensors`` it produced. Separate from cloud_runs_root() on purpose: the
+    staging cleanup is allowed to throw its directory away, this one never is.
+
+    ``create=False`` for the READ path: listing a run's saves happens on every
+    hub poll, and an mkdir per run per poll buys nothing."""
+    p = get('paths.checkpoints_dir') or ''
+    root = Path(p) if p else _data_dir() / 'checkpoints'
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     return root
 
 def backups_dir() -> Path:
