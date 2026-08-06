@@ -91,6 +91,122 @@ there is no need to return to the library and find the dataset first. The button
 is also available on a folded Recent dataset group, so you can start comparing
 checkpoints without expanding its run history.
 
+## Using a full model you trained
+
+Training the **whole model** (rather than a LoRA adapter) produces something
+different from a checkpoint, and **📦 Checkpoints & LoRAs** lists it in its own
+**🧱 Full models** block for exactly that reason.
+
+A delivered run leaves up to two files, and they are not interchangeable:
+
+- the **full-precision master** (~26 GB). This is the only file you can train
+  again or resume from. It is **never** sent to ComfyUI — 26 GB of a model folder
+  to do a job the smaller file does better;
+- the **fp8 twin** (~13 GB). This is the inference format: the file ComfyUI loads
+  with **Load Diffusion Model**.
+
+If the run has a master but no twin, **✨ Quantize to fp8** makes one. It works
+whether the master is on this computer or only in the run's private Hugging Face
+repository — in the second case it is downloaded first, with progress, and the
+transfer can be stopped and resumed. Once the twin exists, **→ Send to ComfyUI**
+puts it where ComfyUI looks. On the same drive that is a hard link: instant, and
+it costs no extra disk space.
+
+**🗑 Trash** moves one of those files to the app trash, so a mis-click on a file
+that cost hours of GPU is recoverable.
+
+**A run whose model is only on Hugging Face is not a lost run.** It shows
+**☁ on Hugging Face** on the board and in its card, and the app refuses to remove
+it: doing so would discard the only record of where that model is.
+
+### Testing a full model
+
+Once the fp8 twin is in ComfyUI, the **Test Studio** lists it as a base and
+**🧪 Test in Studio** opens straight onto it, with its own sample settings filled
+in. That matters: a full model trained here is **undistilled**, so it wants a
+real CFG and a real step count (CFG 4 / 25 steps for Krea 2). The family's
+few-step Turbo defaults render a blurry sketch on it that reads as a failed
+training.
+
+One limit worth knowing before you go looking for a button that is not there:
+**the Test Studio is entered through a LoRA of the dataset.** A dataset trained
+only as a full model has none, so it cannot open the Studio at all. If you have
+any LoRA of that dataset deployed, pick it and set its **strength to 0** — no
+LoRA node is added at 0, so you generate with the bare model.
+
+## Merge a LoRA into a base checkpoint
+
+This is the step between *"I trained a LoRA"* and *"I have a model to publish"*,
+and it is how most of the community checkpoints you can download were actually
+made. Of the Krea 2 checkpoints whose authors describe their method, the ones
+that explain themselves describe a **merge**, not a training run: train a LoRA on
+Raw, fold it into a base, quantize, upload.
+
+You will find it in **📦 Checkpoints & LoRAs**, as **🧬 Merge a LoRA into a base
+checkpoint**. Inside a full model's card the same tool appears with that model
+already filled in as the base.
+
+**Say what you are merging.** Pick a full-precision base, then add one or more
+LoRAs, each with a weight. `1.0` applies a LoRA exactly as it was trained;
+lower blends it in more gently; a negative weight subtracts it. Several LoRAs
+stack — that is what "baked in LoRAs with balanced weights" means when you read
+it on a model page.
+
+**Nothing starts on the first click.** The plan is computed from the file headers
+alone — no weight is read — and it tells you how many tensors change, exactly how
+big the output is, which drive it lands on, roughly how long it takes, and what
+happens if it fails. On a 26 GB Krea 2 base, a measured merge took **about two
+minutes** and rewrote 256 of 430 tensors.
+
+**Nothing is ever overwritten.** The result is written next to the base under a
+new timestamped name, through a temporary file that is only renamed once the
+merge finishes. A merge that fails, or that you stop, leaves the base, the LoRAs
+and any earlier merge exactly as they were.
+
+### It is a merged model, and it says so
+
+The file's own metadata records that it came from a merge, which base it used,
+which LoRAs at which weights, and when. That matters because **file names lie**,
+and because on the model sites "finetune" is routinely used for exactly this
+object — by authors who describe the merge themselves a sentence later. LDS does
+not copy that vocabulary: what comes out of here is a base with LoRAs folded into
+its weights, not a model that was trained as a whole, and the header keeps saying
+so after the file is renamed or re-uploaded.
+
+### Getting the speed back (the Turbo transplant)
+
+A full-model run in this app targets **Raw**, which is undistilled and therefore
+slow. Krea publishes a re-distillation LoRA for Turbo; merging it at **0.8-1.0**
+into a model trained on Raw is the published route people use to get few-step
+behaviour back, and it is how the same model ends up on the model sites in both a
+Raw and a Turbo flavour.
+
+**We have not tested this ourselves.** It is an approximation, not an identity —
+generate a few comparisons before you publish anything on the strength of it.
+
+### Merge first, quantize after
+
+Merging into an **already quantized** file is refused, on purpose. It would
+dequantize every weight, modify it and re-quantize it: lossy on the way in and
+again on the way out, and the loss compounds each time somebody does it. Merge
+into the full-precision (bf16) model, then quantize the merged result with the
+fp8 tool — which is the order the refusal points you at.
+
+### Two things it will tell you about, rather than hide
+
+- **A LoRA that does not belong to the base** is refused before anything is
+  written, naming the weights it expected to find. A LoRA trained for another
+  model has nothing to merge into.
+- **Tensors that are not part of the model** are reported, not dropped. Not every
+  `.safetensors` contains only a model: one community Krea 2 file circulating
+  today carries about 75 MB of an image in two tensors hiding under a legitimate
+  name. Nothing we do not understand is modified — it is copied through, and the
+  plan names it so you know it is there.
+
+**What the merge needs:** the same Python that quantization uses — one with
+`torch` available. If it is missing, the plan says so with the command to fix it,
+before you click anything.
+
 ## Recover a paused Test Studio batch
 
 If ComfyUI drops while Test Studio is processing a batch, the affected tile says
@@ -356,9 +472,23 @@ touching the folder itself:
    🧇 Soft detail, 🎞 Black bars, ≈ Duplicates) to review the worst
    offenders first. **🧹 Auto-reject
    flagged…** clears whole categories in one click (your manual ✓/✕ are never
-   flipped). In the Duplicates view, resolve every group at once with **keep
-   best** (highest resolution, then sharpest) or **keep first**, or pick the
-   keeper by eye.
+   flipped). The number beside each checkbox is what *that click* would reject —
+   still-undecided images only, which is why it is usually smaller than the
+   count on the matching filter chip: the chip shows every image carrying the
+   flag, including the ones a previous auto-reject already threw away — and it
+   counts them **inside whatever else you have filtered**, so it always states
+   the size of the page it opens. (Each chip is measured with your other filters
+   applied and its own value lifted, so picking one never blanks its
+   neighbours, and a chip stays on offer even when it holds nothing under the
+   current filter. The auto-reject number stays whole-bank on purpose: that pass
+   runs over the bank, not over the view.) Run it
+   twice and the second run legitimately says **0 to reject**: there is nothing
+   left it is allowed to touch. A flag also warns when its pass never ran, and
+   the panel says how many images have **never been scanned** — those are
+   invisible to every quality flag until 🔎 Scan measures them, which is not the
+   same thing as being clean. In the Duplicates view, resolve every group at
+   once with **keep best** (highest resolution, then sharpest) or **keep
+   first**, or pick the keeper by eye.
 4. **👥 Group by person** — the face pass (needs the Quality tools from Setup)
    detects the dominant face of every remaining image and clusters the bank by
    person, *no reference photo needed*. Click a person card to see only them,
@@ -496,6 +626,59 @@ rarely needs a description on every shot). Stop it any time — and when you com
 back, a saved report at the top of the bank tells you exactly what ran, what was
 skipped and why, with the headline counts.
 
+## Choosing where a bank pass runs
+
+Every pass button in the bank ends in `…` and opens a **launch window** before
+anything runs. The window is not a settings panel — it says three separate
+things, and keeping them apart is the point.
+
+**This run — where it applies, and how big that is.** Five lines, and each one
+quotes the number of images *that pass* would actually walk:
+
+| Line | What it means |
+|---|---|
+| Kept + undecided | What every pass has always run on. The default; picking it sends exactly the request the app sent before this window existed. |
+| ✓ Kept only | The images you already decided to keep. |
+| Undecided only | The ones you have not ruled on. |
+| ✕ Unkept only (the bin) | Images you rejected. Nothing is deleted or un-rejected — but the run spends its time on shots you set aside, and the window says what that costs for this particular pass. |
+| All three, the bin included | Everything. |
+
+If you have images **selected**, that becomes the first line and wins by
+default — the pass runs on your selection, narrowed by what it still has to do.
+It says *"up to N"*, never a bare N, because the server intersects your selection
+with the pass's own pool and the run can only ever be shorter.
+
+Under those lines sits the **"do it again"** tick: *also re-measure images that
+were already scanned*, *throw the cached embeddings away*, and so on. This is
+where the old **Rescan all** and **Rescore all** buttons went. They were never
+separate passes — they were this scope, wearing a button's clothes — so they now
+sit next to the pool they re-run, unticked, with their price written next to
+them.
+
+**Settings this pass reads.** Only what the *calculation* consumes, with where
+each value lives. 🔎 Scan quality, for instance, reads exactly one of the twelve
+🎚 filter thresholds (`dup_distance`), and it reads it for the duplicate grouping
+at the end — not for the measuring.
+
+**Not decided here.** The knobs that only change how the grid is **sorted and
+flagged**. Those re-apply the moment you save them, with no pass at all. The
+sharpness, noise and aesthetic thresholds live here: nudging one costs you
+nothing.
+
+Three passes **refuse a partial scope**, and the window shows the option greyed
+out with the reason rather than hiding it: **✨ Score**, **👥 Group by person**
+and **✂ Find crops & variants** each produce one numbering of the *whole* bank,
+recomputed from scratch on every run. Handed a slice, they would number that
+slice from 1 and land those ids on top of unrelated groups already saved.
+
+Two things the scope does **not** cover, stated in the windows that need it:
+🔎 Scan's duplicate grouping always covers the whole bank (it works from stored
+hashes and renumbers them together), and 🎨 Classify medium also runs chained
+inside ✨ Score with the default scope.
+
+A run with **nothing to do** is refused before it starts, with the reason and a
+suggestion — not launched and then reported as a success.
+
 ## When a folder is already one person
 
 Scraped material usually arrives sorted: one folder per person. **👤 Group by
@@ -583,16 +766,58 @@ one you would have no reason to go looking for.
 Four things the dialog always tells you:
 
 - **what the check costs, against what it saves** — *Checking 12 folders (~15
-  images each — 180 in all), against the 7 316 this pass would embed.*
+  images each — 180 in all, up to 720 where faces are hard to find), against the
+  7 316 this pass would embed.*
 - **what ticking the boxes spares** — *3 412 images are grouped instantly and
   skipped by the pass.*
 - **why a folder is not offered** — *3 different faces in the sample — analyzed
-  in full*, or *only 1 of 15 sampled images had a usable face — analyzed in
-  full*. A doubtful folder is never quietly ticked.
+  in full*. A doubtful folder is never quietly ticked.
 - **what it did not reach.** The preflight covers up to 200 folders in one go.
   Beyond that it says *N folders were not checked (biggest first) — they get the
   full analysis*, because silence there would read as "the rest are not one
   person".
+
+### When the sampled images have no face in them
+
+Scraped folders are full of crops, backs, distant shots and blur. A sample of
+fifteen can land entirely on those, and until recently that ended the folder's
+story: *only 0 of 15 sampled images had a usable face — analyzed in full*. On a
+3 546-image folder that meant fifteen embeddings spent for no answer at all, and
+then the whole pass anyway — exactly the cost the check exists to avoid.
+
+A draw that cannot be read is now **replaced**. The check keeps drawing new
+images — never one it has already tried, still spread across the whole folder —
+until it has about fifteen images with a usable face, or until it runs out of
+**budget**. That budget is the point, because "keep drawing" without one is the
+full pass by the back door. It is the smaller of two numbers, per folder:
+
+- **at most 60 images** — fifteen usable faces at a hit rate of one in four,
+  which is the worst rate still worth chasing;
+- **at most a quarter of the folder** — so a small folder is never nearly
+  analysed in full just to be described. Folders of 60 images or fewer keep the
+  single draw they have always had.
+
+That cap is also why the check can never quietly become expensive: a quarter of
+a folder is a quarter of what analysing it would cost, and the dialog prints the
+ceiling next to the typical cost before you start.
+
+Three ways it can end, and each says which one it is:
+
+- **enough usable faces** — the verdict you already know: *15/15 of 30 sampled
+  images look like the same person.*
+- **the budget ran out with a few** — *looks like one person, on thin evidence —
+  only 6 usable faces in 60 images tried.* It is still offered and still
+  pre-ticked, because the bar for an offer has always been two agreeing faces and
+  six is more evidence than two, not less — but the row says what it rests on so
+  you can weigh it.
+- **almost nothing readable** — *no readable face in 60 images tried across the
+  folder — crops, backs or blur.* This is not the check failing; it is what the
+  folder is. **The full pass will not do better on those images**: the preflight,
+  the folder check and the pass all drive the same detector at the same
+  thresholds, and the check writes its answers into the pass's own embedding
+  cache, so the pass reads them straight back rather than looking again. Grouping
+  by face simply has little to grip in that folder, and much of it will stay
+  ungrouped whatever you run.
 
 If there is nothing to ask — a bank with no subfolders, or one whose folders you
 have already declared — no dialog appears at all and the pass starts straight
@@ -898,6 +1123,105 @@ is free even after a restart.
 On a memory-tight machine you can set `bank_scoring.text_search_idle_minutes` to
 `0`: nothing is ever kept warm, and each new phrase pays the ten seconds instead.
 
+## Choose who captions a bank, and which pile
+
+The 🏷️ **Caption** pass in ① Analyze has its own **Caption options** row, and
+every control on it applies to **that run only** — your Settings stay the
+default and are never rewritten from here.
+
+**Which pile gets captioned.** Three choices, and rejected images are in none of
+them:
+
+- **Kept + undecided** — the default, and exactly what the pass always did.
+- **✓ Kept only** — caption what you have already chosen, and nothing else. This
+  is the cheap one: on a 20 000-image dump where you kept 300, it is 300 vision
+  calls instead of 20 000.
+- **Undecided only** — the opposite errand. Captions feed the 🔍 search and the
+  🏷️ tag chips, so captioning the undecided pile is how you get *tools* to
+  triage it with.
+
+Each option carries its own count, and the button quotes the number it is really
+about to write. That number is **not** the size of the pile: images that already
+have a caption are skipped, so a bank of 4 000 kept images can honestly offer
+"Caption 12 kept". When everything in a pile already has a caption the button
+says so and goes inert.
+
+**A selection wins.** Select images first and the scope select greys out: the
+pass captions your selection, and the button switches to counting it. The server
+would otherwise *intersect* the two, and "Caption 12 selected" could quietly
+write 4.
+
+**Which engine, and which model.** Two more selects on the same row:
+
+- **Caption engine** — *Auto* is a chain, not a coin flip: JoyCaption drafts and
+  Ollama covers whatever it missed. Forcing *JoyCaption only* removes the Ollama
+  half rather than picking one of two.
+- **Caption vision model** — any Ollama model you have pulled. It is only used
+  when the engine can reach Ollama, and it is greyed out otherwise. A model
+  configured elsewhere stays selectable even if it is not in the live list.
+
+This last one matters more than it looks. A captioner that describes plainly
+visible things in evasive terms produces captions that are about something
+slightly *other* than your images — and a LoRA trained on those learns to look
+away too, with nothing in the output to reveal it. The captions read perfectly
+well. That is the problem. If you caption NSFW material, pair the **Explicit**
+register with an uncensored (abliterated) model; the app warns you when the
+model it is about to use does not look like one.
+
+You can change the model between runs on the same bank. 🏷️ **Caption** never
+rewrites anything: it only fills images that have no caption yet, so a second run
+with a different model captions the rest, not the ones already done. To redo the
+ones already done, see the next section.
+
+## Redo the captions of a bank with a different model
+
+🏷️ **Caption** skips images that already have a caption — which is what you want
+until the day it isn't. Once a bank is fully captioned that button reaches zero
+images and goes inert, and on a bank you captioned with a model you have since
+decided was a poor one, "nothing left to caption" is the wrong answer.
+
+🔄 **Re-caption**, at the end of the **Caption options** row, is that answer. It
+runs the same pass with the same engine, model, register and length you picked on
+that row, on the pile the scope select names — and it **overwrites** the captions
+that are already there.
+
+**It keeps the captions you wrote yourself.** Every caption now records who wrote
+it — JoyCaption, Ollama, or you. "You" means: typed or corrected in a dataset's
+caption box, changed by a find/replace across a dataset, or brought back as `.txt`
+sidecars from another tool. That record travels with the text through
+**Import to bank**, bank-to-bank copies, promotion back to a dataset, and backup
+restores, so a caption you wrote in a dataset three steps ago is still recognised
+as yours here. Re-caption skips those rows, exactly as the person pass skips a
+subfolder you declared to hold one person.
+
+**It tells you three numbers before you click, and never merges two of them.**
+The button quotes what it will rewrite (the pile, minus what it spares). The amber
+line under the row breaks the rest apart: how many captions it *keeps* because you
+wrote them, how many it overwrites **whose author was never recorded**, and how
+many a model wrote. The confirmation repeats them. None is an estimate; they all
+come from the same count the pass itself uses, so the figure on the button is the
+number of images that change.
+
+**"Origin never recorded" is the one to read carefully.** Captions written before
+the app started keeping track carry no author, and there is no way to work one out
+after the fact. Those are re-captioned — sparing them would make this button do
+nothing at all on any bank that already exists — so if you hand-wrote captions in
+an older version, they are in that count. It is stated separately from the
+machine-written ones for exactly that reason.
+
+**If you do want your own captions redone**, tick **"Also rewrite the N caption(s)
+I wrote"** next to the button. It only appears when there is something to protect,
+it is never pre-ticked, and the confirmation names it again.
+
+**There is still no undo.** The bank's ↩ Undo covers keep/reject decisions only;
+it has never covered captions, and this change does not add one.
+
+**It works by pile, never on a selection.** With images selected the button goes
+inert and says why: a selection can cover pages that were never loaded, so the
+app cannot count how many of them already have a caption — and it will not run a
+destructive pass on a number it cannot state. Clear the selection to re-caption a
+pile. 🏷️ **Caption** still honours selections as it always did.
+
 ## Review a bank one image at a time
 
 Filter chips and bulk actions clear the obvious trash, but the last call —
@@ -1007,10 +1331,37 @@ The 🔄 rotate button needs no undo entry: turn the other way and the image is
 byte-for-byte the original again.
 ## Find more images like this one — by attribute, not by look
 
-Every captioned tile in a bank carries a 🏷️ badge. **Click it** and that image's
-caption opens as a row of chips in the filter bar: `woman`, `red`, `dress`,
-`balcony`. Tick the ones you care about and the grid narrows to the images whose
-captions mention them.
+**Select an image** in a captioned bank and its tags are already there, in the
+filter bar: `woman`, `red`, `dress`, `balcony`. Tick the ones you care about and
+the grid narrows to the images whose captions mention them. No extra click, no
+badge to find.
+
+**Select several and the row counts.** Each chip carries how many of your
+selected images cite it — `red dress 7 / 12` means 7 of the 12 captioned images
+you picked mention it. That is deliberately *not* an intersection: keeping only
+the tags every single image shares would print 12 next to each survivor (a number
+that says nothing) and usually leave you with one word. What you want to know is
+that a tag describes over half of what you selected.
+
+The row is honest about what it did **not** count, on its own lines:
+
+- images in your selection with **no caption yet** — named, not folded into the
+  denominator, so `7 / 12` always means 7 of 12 images that had something to say;
+- images whose caption held **no word worth filtering on** (`a photo of her`) —
+  a different problem with a different fix;
+- a selection **too large to read in one request**, which says how many images it
+  left out rather than quietly shrinking the total.
+
+Tick a chip and the row **holds still** while the filter runs, even though
+filtering clears the selection — it keeps showing the tags of the selection you
+filtered *from*.
+
+The 🏷️ **badge on a tile** is still there, in the bottom-right corner next to ▶
+and ⛶ where the tile's actions live. It reads one image's tags *without*
+selecting it. On an image with no caption — or a caption with no word worth
+filtering on — the badge stays visible and greyed, and its tooltip says which of
+the two it is: a feature that silently disappears is indistinguishable from one
+that was never built.
 
 This is the readable cousin of **🎯 Similar to selected**, and the difference is
 worth knowing because they fail differently:
@@ -1388,6 +1739,43 @@ a separate copy. A rotated image is shown unrotated here, because the whole
 watermark lane works on your original file, which the ↻ turn never changed.
 
 
+## Reject every flagged image at once
+
+In a dataset, **🧽 Find watermarks** flags the kept images that carry an overlaid
+mark. The recommended way through the pile is **🔍 Review flagged**, one image at
+a time — the detector is a review flag, not a verdict, and it *does* flag clean
+images sometimes. When you would rather drop the whole pile and move on,
+**✕ Reject all flagged (N)** does exactly that.
+
+Four things worth knowing before you click it:
+
+- **The number is the number.** `N` is what the button will really reject, not
+  how many are flagged. Small-image rescue pairs are excluded (the server refuses
+  a batch containing one, so including them would reject *nothing*) and failed
+  rows are excluded (the server skips them). If the two differ, the row says so
+  in plain text rather than showing you the bigger figure.
+- **Nothing is deleted.** Rejected images stay on disk and simply leave the
+  training set. To bring any of them back: **Show ▸ Rejected** in the grid,
+  select, then **✓ Keep**.
+- **It clears the watermark flags.** That is the one thing rejecting destroys:
+  after the click, 🔍 Review flagged is empty and nothing records which images
+  had been flagged. Re-run 🧽 Find watermarks to flag them again.
+- **Stop is available while a scan runs.** The ⏹ Stop button in the progress
+  banner ends the scan at the next image; everything already judged is kept, and
+  running 🧽 Find watermarks again finishes the rest.
+
+Which engine does the flagging is a setting — **Settings ▸ Captioning & quality ▸
+Watermark detection** — and it applies to datasets and banks alike. *Auto* uses
+the optional watermark detector when it is installed and the vision model
+otherwise, which is what the app has always done. Pin *Watermark detector*
+without the extra installed and the scan still runs, on the vision model, and
+says so with the link to install it. Only the detector can flag an image
+**without a position**; those are counted apart, 🧽 Clean leaves them alone, and
+you can draw the zone in 🔍 Review flagged. Images you dismissed as false
+positives are skipped by every later scan — **⟲ Rescan incl. dismissed** is the
+only way to have them judged again, which is what you want after changing engine.
+
+
 ## A bank and a dataset never share files
 
 A dataset and an image bank can hand images to each other in both directions,
@@ -1524,6 +1912,43 @@ packages, you can skip installing them a second time. It will not be faster.
 reversible at any time, and the note under the passes always says which
 interpreter is in use. If you never open this dialog, nothing changes: an install
 that works today keeps working, untouched.
+
+## Stopping Score, and what a relaunch costs
+
+**✨ Score** always covers the whole bank — but it only *computes* what it does
+not already have. Every image it scores is written to a cache next to the bank
+(the CLIP embedding plus the aesthetic and NSFW numbers), and a relaunch reads
+that cache and pays only for the rest. On a bank that is fully scored, the pass
+does not even load the model: it goes straight to the grouping.
+
+So **Stop is safe**, and it is now safe in the database too. When you stop a run,
+the scores it had already computed are written to your images before the pass
+ends — that work was paid for, and it used to reach the cache and never reach a
+single row. The line at the end of the pass says exactly what happened: how many
+images were scored, how many remain, and how many were reused instead of
+recomputed.
+
+One thing does *not* survive a stop: the **🎨 style groups**. Those ids are not a
+per-image measurement, they are a single numbering of the whole bank, computed
+from every embedding at once and renumbered on each pass. Half of one is not
+partial progress — it would put a new group 1 next to an old group 1 and mix two
+unrelated styles under the same chip. So a stopped pass leaves the previous
+grouping alone and says so. Relaunch and it finishes: the scoring part is already
+cached, and only the grouping is left. That grouping is the slow tail of the pass
+— about **8 seconds over 5 000 images and 3 minutes over 23 000** — so on a big
+bank it is worth letting it finish.
+
+**Rescore all** is the last line of ✨ Score's launch window, unticked. It is the
+opposite intent: throw the cache away and recompute everything, for a bank you
+scored with a different setup or whose results you no longer trust. It costs a
+full pass, which is why it is a deliberate tick and never a default — ✨ Score
+itself has always meant "cover the whole bank", and it still does.
+
+One more thing a relaunch fixes on its own: if the aesthetic head or the NSFW
+model could not be downloaded during an earlier run, the images scored in that
+window carry a hole. They are picked up again the next time you run Score, once
+the missing piece is available — an image is never left permanently half-scored
+because a download failed once.
 
 ## The LoRA Canvas (every run on one board)
 

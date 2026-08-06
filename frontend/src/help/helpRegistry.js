@@ -219,6 +219,27 @@ const TOPICS = [
       'graph', 'lineage', 'runs graph', 'continue', 'download'],
     guide: { chapter: 'dataset-guide', anchor: '6-after-training-pick-the-right-checkpoint' },
     app: { route: '/datasets?section=checkpoints' } },
+  // A full model is not an adapter, and the panel gives it its own block and its
+  // own verbs (quantize / send the fp8 twin / trash). It therefore needs its own
+  // topic: searching "26 GB", "master" or "send to ComfyUI" must not land on the
+  // LoRA deploy instructions, which say the opposite of what a full model needs.
+  { id: 'workspace-dense-models', kind: 'section', title: 'Full models',
+    keywords: ['full model', 'dense', 'full transformer', 'master', 'fp8', 'twin',
+      'quantize', 'send to comfyui', '26 gb', 'diffusion_models', 'raw', 'undistilled',
+      'hugging face', 'checkpoint store'],
+    guide: { chapter: 'using-the-app', anchor: 'using-a-full-model-you-trained' },
+    app: { route: '/datasets?section=checkpoints' } },
+  // Its own topic, not a line under "Full models": a merge is how most published
+  // checkpoints are actually made, and someone searching "turbo", "bake",
+  // "finetune" or "publish a checkpoint" is asking for THIS, not for the
+  // quantize button or the LoRA deploy instructions.
+  { id: 'workspace-lora-merge', kind: 'action', title: 'Merge a LoRA into a base',
+    keywords: ['merge', 'merge lora', 'bake', 'bake in', 'fold', 'full model from lora',
+      'checkpoint from lora', 'finetune', 'turbo', 'transplant', 're-distillation',
+      'distill', 'publish a checkpoint', 'civitai', 'base plus lora', 'stack loras',
+      'merged model', 'speed back', 'few-step'],
+    guide: { chapter: 'using-the-app', anchor: 'merge-a-lora-into-a-base-checkpoint' },
+    app: { route: '/datasets?section=checkpoints' } },
   { id: 'workspace-studio', kind: 'section', title: 'Studio',
     keywords: ['studio', 'test', 'lora', 'checkpoint', 'winning settings'],
     guide: { chapter: 'dataset-guide', anchor: '6-after-training-pick-the-right-checkpoint' },
@@ -262,6 +283,14 @@ const TOPICS = [
       'caption', 'captions', 'search', 'find', 'tag', 'tags', 'describe',
       'launch all', 'pipeline', 'auto-reject', 'overnight', 'run everything',
       'one click', 'batch', 'chain',
+      // "auto-reject doesn't work" — what it really means, in the words people
+      // type: the button only touches UNDECIDED images, so a second run has
+      // nothing left to do, and a never-scanned image is invisible to every
+      // quality flag.
+      'auto reject does nothing', "auto-reject doesn't work", 'rejected 0',
+      '0 to reject', 'nothing rejected', 'count is wrong', 'wrong count',
+      'flagged but not rejected', 'never scanned', 'not scanned', 'unscanned',
+      'blind spot', 'run it twice', 'second pass',
       'framing', 'shot type', 'face', 'bust', 'body', 'back', 'full body',
       'close-up', 'back view', 'classify framing', 'composition',
       'coverage advice', 'balance', 'what to add', 'missing', 'thin', 'imbalance',
@@ -312,6 +341,18 @@ const TOPICS = [
      'framing x person', 'curate', 'curation', 'selection', 'select', 'subset',
      'bank', 'lora quality', 'what to add'],
     '/bank', 'using-the-app', 'pick-a-balanced-set'),
+  action('bank-pass-scope', 'Choose where a bank pass runs before it runs',
+    ['pass', 'passes', 'launch window', 'window', 'dialog', 'modal', 'scope',
+     'where it runs', 'kept', 'kept only', 'undecided', 'unkept', 'the bin',
+     'rejected', 'all three', 'selection', 'selected images', 'run on selection',
+     'rescan all', 'rescan', 'rescore all', 'rescore', 'run it again', 'redo',
+     'do it again', 'force', 'already scanned', 'already scored',
+     'greyed out option', 'disabled option', 'why can i not pick', 'refuses',
+     'partial scope', 'whole bank', 'renumber', 'groups', 'style groups',
+     'nothing to do', '0 images', 'scan', 'caption', 'framing', 'medium',
+     'watermark', 'angles', 'settings this pass reads', 'not decided here',
+     'thresholds', 'bank', 'triage'],
+    '/bank', 'using-the-app', 'choosing-where-a-bank-pass-runs'),
   action('bank-single-person-folder', 'Tell the bank a folder is already one person',
     ['single person', 'one person', 'same person', 'this folder is one person',
      'assert', 'assertion', 'declare', 'say who', 'i know who', 'folder per person',
@@ -337,6 +378,14 @@ const TOPICS = [
      'analyze everything anyway', 'skip the check', 'untick', 'uncheck',
      'why is my pass asking me something', 'sampled', 'sampling', 'sample',
      'not checked', 'not reached', 'ceiling', '200 folders',
+     // When the sample lands on images with no face, the check draws MORE rather
+     // than giving up — these are the words of the three ways that can end.
+     'no usable face', 'no readable face', 'only 0 of 15', 'only 1 of 15',
+     'had a usable face', 'no verdict', 'no result for a folder', 're-draw',
+     'redraw', 'draws more', 'tries more images', 'images tried', 'budget',
+     'thin evidence', 'partial', 'weak verdict', 'crops', 'backs', 'blurry',
+     'why was my folder not checked', 'why no answer for this folder',
+     'up to 60', 'more than 15 images', 'why is it slower than it said',
      'group by person', 'face pass', 'launch all', 'save gpu time', 'faster',
      'too slow', 'expensive', 'bank', 'triage', 'person', 'subfolder'],
     '/bank', 'using-the-app', 'checking-your-folders-before-the-person-pass'),
@@ -414,13 +463,49 @@ const TOPICS = [
      'review faster', 'grid', 'unscored', 'unscanned', 'not scored', 'greyed out',
      'disabled sort', 'bank', 'triage'],
     '/bank', 'using-the-app', 'sort-a-grid-to-review-faster'),
-  action('bank-tag-chips', 'Filter a bank by the tags of one image',
+  action('bank-tag-chips', 'See the tags of what you selected, and filter by them',
     ['tag', 'tags', 'chips', 'tag chips', 'clickable tags', 'attributes',
      'same tags', 'more like this', 'like this one', 'similar', 'find similar',
      'by attribute', 'caption words', 'keywords', 'red dress', 'and',
      'both tags', 'narrow', 'whole word', 'booru', 'prose', 'badge',
-     'label icon', 'bank', 'triage', 'caption'],
+     'label icon', 'bank', 'triage', 'caption',
+     // The selection row: the words people type when they want the count, or
+     // when they wonder why a denominator is smaller than what they picked.
+     'selected', 'selection', 'several images', 'multiple images', 'many images',
+     'tags in common', 'common tags', 'how many', 'how often', 'count', 'counts',
+     'cited', 'frequency', 'most cited', '7 / 12', 'fraction', 'denominator',
+     'not counted', 'no caption yet', 'uncaptioned', 'too many selected',
+     'where did the tags go', 'tags disappeared', 'badge moved'],
     '/bank', 'using-the-app', 'find-more-images-like-this-one-by-attribute-not-by-look'),
+  action('bank-caption-options', 'Choose the caption engine, model and pile for a bank run',
+    ['caption', 'captions', 'caption options', 'caption engine', 'engine',
+     'caption model', 'vision model', 'ollama model', 'change model',
+     'which model', 'pick model', 'model picker', 'joycaption', 'ollama',
+     'auto', 'per run', 'this run only', 'without changing settings',
+     // The scope half, in the words people actually type.
+     'caption scope', 'scope', 'only kept', 'kept only', 'caption kept',
+     'undecided', 'undecided only', 'pending', 'not decided', 'unsorted',
+     'caption everything', 'caption all', 'too many captions', 'too slow',
+     'skip rejected', 'rejected', 'how many will it caption', 'count',
+     'button says all', 'nothing happened', 'already captioned',
+     'explicit', 'abliterated', 'uncensored', 'euphemism', 'evasive',
+     'bank', 'triage'],
+    '/bank', 'using-the-app', 'choose-who-captions-a-bank-and-which-pile'),
+  action('bank-recaption', 'Redo a bank\'s captions with another model (overwrites)',
+    ['re-caption', 'recaption', 'redo captions', 'rewrite captions', 'again',
+     'caption again', 'change model', 'better model', 'wrong model', 'force',
+     'overwrite', 'overwrite captions', 'replace captions', 'start over',
+     'button greyed out', 'greyed out', 'disabled', 'cannot caption',
+     'already captioned', 'nothing to caption', 'model picker does nothing',
+     'undo captions', 'undo', 'lost my captions', 'destroyed', 'edited by hand',
+     'hand written', 'manual caption', 'bank', 'triage', 'caption', 'captions',
+     // The protection and its way out: what someone types when they want to know
+     // whether their own words are safe, or when they want them redone anyway.
+     'who wrote this caption', 'caption origin', 'provenance', 'authorship',
+     'skipped my captions', 'it kept my captions', 'why was it skipped',
+     'origin never recorded', 'unknown origin', 'also rewrite the ones i wrote',
+     'include my captions', 'rewrite my own captions', 'asserted'],
+    '/bank', 'using-the-app', 'redo-the-captions-of-a-bank-with-a-different-model'),
   action('bank-exclude-words', 'Hide bank images that already carry a word',
     ['exclude', 'exclude words', 'hide', 'hide images', 'without', 'not',
      'inverse search', 'opposite of search', 'negative search', 'minus',
@@ -1106,11 +1191,31 @@ const TOPICS = [
     keywords: ['full model', 'full-model', 'dense', 'krea', 'raw', 'recipe', 'locked',
       'learning rate', 'lr', 'resolution', '768', '1024', 'checkpoint every', 'keep',
       'preview prompts', 'sample prompts', 'adafactor', 'batch', 'bf16',
-      'gradient checkpointing', '80 gb'],
+      'gradient checkpointing', '80 gb',
+      // Why Raw is still the recommendation even though Turbo is now allowed —
+      // searched as "should I train dense on turbo", not just "what can I edit
+      // here". The guide section spells out what is actually known and what is
+      // merely carried over from neighbouring models.
+      'turbo', 'distilled', 'speed distilled', 'speed-distilled', 'distillation',
+      'de-distillation', 'de-distilled', 'assistant lora', 'untested', 'warning'],
     guide: { chapter: 'dataset-guide', anchor: '10-full-model-recipe-what-you-can-change' },
     app: { route: '/datasets?section=training' },
     tip: { trigger: 'full-model-recipe-unlocked',
       text: 'New: the full-model recipe now lets you edit the preview prompts, learning rate, resolution and checkpoint cadence — the rest stays locked because it is what makes a 12B model fit on one 80 GB card.' } },
+  // Its own topic rather than more keywords above: the question here is not
+  // "what may I change?" but "what am I actually fine-tuning?", and it now has
+  // three answers instead of one. It is also where the two refusals that
+  // REMAIN have to be explained, or a greyed control reads as a bug.
+  { id: 'training.full_model_base', kind: 'setting',
+    title: 'Base to fine-tune (Raw, Turbo, or your own checkpoint)',
+    keywords: ['full model', 'full-model', 'dense', 'krea', 'raw', 'turbo',
+      'base', 'base model', 'custom base', 'custom weights', 'own checkpoint',
+      'safetensors', 'fp8', 'scaled fp8', 'quantized base', 'int8',
+      'cannot be loaded', 'few-step', 'distilled', 'variant'],
+    guide: { chapter: 'dataset-guide', anchor: '10-full-model-recipe-what-you-can-change' },
+    app: { route: '/datasets?section=training' },
+    tip: { trigger: 'full-model-base-picker',
+      text: 'New: full-model training is no longer limited to the official Krea 2 Raw base — pick Turbo (with a warning: nobody has measured a full-model run on a distilled base) or a Krea 2 checkpoint from your own disk. A ComfyUI scaled-fp8 export still cannot be trained: the loader refuses it, and the app says so when you pick it.' } },
   // The three quality levers get their OWN topic rather than more keywords on
   // the one above, because the question behind them is different: not "what may
   // I change here?" but "what should I change, and what does it cost me?". The
@@ -1161,11 +1266,28 @@ const TOPICS = [
     app: { route: '/datasets?section=training' },
     tip: { trigger: 'fp8-deliver-one-click',
       text: 'New: “✨ Quantize to fp8” on a delivered full model does the whole thing — it fetches the master from your private Hugging Face repo, converts it, and leaves the fp8 file in ComfyUI’s own models folder. It tells you which checkpoint it takes and where the file lands before it starts, refuses if the disk is too small, and can be stopped and resumed.' } },
+  // Two questions behind one word. The refusal topic keeps its id (in-app help
+  // badges and bookmarked links resolve against it), but the title and keywords
+  // now cover BOTH answers: a packed export is refused, a plain fp8 cast is
+  // allowed and merely costly.
   { id: 'training.quantized_base_refused', kind: 'setting',
-    title: 'Why a quantized checkpoint is refused as a training base',
+    title: 'Which quantized checkpoints can be trained on, and which cannot',
     keywords: ['quantized', 'quantised', 'fp8', 'int8', 'gguf', 'custom weights',
-      'base', 'refused', 'inference only', 'training', 'bf16', 'fp16', 'error'],
+      'base', 'refused', 'inference only', 'training', 'bf16', 'fp16', 'error',
+      'scaled fp8', 'scale_weight', 'comfy_quant', 'packed export', 'fp8 cast',
+      'cannot be loaded', 'strict', 'state dict', 'degraded', 'precision'],
     guide: { chapter: 'dataset-guide', anchor: '10-full-model-recipe-what-you-can-change' },
+    app: { route: '/datasets?section=training' } },
+  // The Krea base LIST is a different question from the quantization verdict a
+  // listed entry may carry ("where are my models?" vs "why is this one greyed
+  // out?"), and it is searched with the family name, so it gets its own topic.
+  { id: 'training.krea_installed_bases', kind: 'setting',
+    title: 'Training Krea 2 on a checkpoint you already have',
+    keywords: ['krea', 'krea 2', 'base', 'base model', 'checkpoint', 'unet',
+      'diffusion_models', 'my model', 'installed', 'continue training', 'merge',
+      'community model', 'full model', 'not listed', 'missing from the list',
+      'custom weights', 'absolute path'],
+    guide: { chapter: 'dataset-guide', anchor: '1-pick-your-model-family-first' },
     app: { route: '/datasets?section=training' } },
   // Dual captions is a per-run Advanced training option (not a global Setting),
   // so it points at the dataset guide's dedicated section rather than
@@ -1308,6 +1430,17 @@ const TOPICS = [
     '/datasets?section=curation&panel=watermarks', 'settings-reference', 'captioning-quality',
     { trigger: 'watermark-batch-clean',
       text: 'Clean has two engines — LaMa (fast) and Klein (quality) — and auto-crop can be turned off.' }),
+  action('action-dataset-reject-flagged', 'Reject every flagged image at once',
+    ['reject all', 'reject flagged', 'bulk reject', 'watermark', 'flagged', 'shortcut',
+     'undo reject', 'bring back', 'rejected', 'false positive', 'stop watermark scan',
+     'cancel scan', 'rescan dismissed'],
+    '/datasets?section=curation&panel=reject-flagged', 'using-the-app',
+    'reject-every-flagged-image-at-once'),
+  setting('setting-watermark-backend', 'captioning', 'wmdet-backend',
+    'Which engine finds watermarks',
+    ['watermark backend', 'watermark detection', 'detector', 'vision model', 'ollama',
+     'siglip', 'auto', 'which detector', 'why is this flagged', 'watermark source',
+     'not installed', 'fallback', 'extra']),
   action('action-bank-watermark-clean', 'Clean a bank\'s watermarks (2 levels)',
     ['watermark', 'bank', 'clean', 'crop', 'auto-crop', 'inpaint', 'lama', 'klein',
      'remove watermark', 'logo', 'url', 'undo cleaning', 'before after', 'original',
@@ -1348,6 +1481,13 @@ const TOPICS = [
      'ai-toolkit', 'comfyui', 'venv', 'environment', 'faster', 'speed up',
      'aesthetic', 'nsfw', 'borrow', 'reuse'],
     '/bank', 'using-the-app', 'make-score-use-a-gpu-python-you-already-have'),
+  action('action-score-resume', 'Stopping ✨ Score, and what a relaunch costs',
+    ['score', 'scoring', 'stop', 'stopped', 'cancel', 'resume', 'relaunch', 'restart',
+     'rerun', 're-run', 'again', 'cache', 'cached', 'skip', 'already scored',
+     'lost my scores', 'starts over', 'from scratch', 'rescore', 'rescore all',
+     'recompute', 'redo', 'style groups', 'style cluster', 'aesthetic', 'nsfw',
+     'partial', 'interrupted', 'bank', 'triage'],
+    '/bank', 'using-the-app', 'stopping-score-and-what-a-relaunch-costs'),
   action('action-grid-status-filter', 'Filter the grid by decision',
     ['filter', 'decision', 'undecided', 'awaiting', 'pending', 'kept', 'keep', 'rejected',
      'reject', 'improve', 'candidates', 'klein', 'isolate', 'triage', 'select all', 'grid'],
@@ -1470,7 +1610,12 @@ const TOPICS = [
   action('continue-training', 'Continue a training run',
     ['continue', 'resume', 'more steps', 'epoch', 'checkpoint', 'restart', 'undercook', 'overcook',
      'learning rate', 'lr', 'half', 'tenth', 'gentle finish', 'polish', 'timestep', 'cadence',
-     'lane', 'local', 'cloud', 'run it'],
+     'lane', 'local', 'cloud', 'run it',
+     // How a full model's 26 GB reaches the pod — the priced choice in this
+     // same dialog. Searchable from the words a user would actually type when
+     // they are staring at a GPU cost they did not expect.
+     'send it via', 'transport', 'upload', 'uplink', 'hugging face copy',
+     'gpu cost', 'how long', 'slice', 'resumable upload'],
     '/datasets?section=checkpoints', 'dataset-guide', '6-after-training-pick-the-right-checkpoint',
     { trigger: 'continue-any-epoch',
       text: 'Finished a run? ▶ Continue trains it further — for any number of steps, or resumed from an earlier, less-cooked epoch.' }),

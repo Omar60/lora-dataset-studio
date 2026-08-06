@@ -13,10 +13,19 @@ and in both cases the pod is the only sane endpoint:
   most often) costs resumability, never the run.
 * **pull** — resuming a dense run means the checkpoint has to be sitting in the
   new pod's ``save_root`` before ai-toolkit starts, so its auto-resume finds it.
-  The LoRA lane seeds that file from disk through ``/api/datasets/upload``, but
-  that route's multipart body is built entirely in memory (fine for an 85 MB
-  LoRA, an OOM at 26 GB) with a 300 s timeout. A pod that fetches its own
-  checkpoint straight from the Hub sidesteps both.
+  A pod fetching it from the Hub is the FAST way to put it there: a datacenter
+  link makes ~26 GB a matter of minutes, against hours of a home uplink billed
+  at the pod's hourly rate the whole time.
+
+  This paragraph used to say something else — that sending the local file was
+  impossible, because the upload route built its whole request in memory "with
+  a 300 s timeout". Both halves were true of the code as it stood and neither
+  is true now (``pod_checkpoint_push``: the body is streamed, the file goes in
+  resumable slices, and the timeout was never a duration cap — requests' is an
+  inactivity timeout). It is corrected rather than deleted because this file's
+  own reasoning was built on it: the Hub road is still the one to prefer, and
+  it is now preferred for what it costs, not for what the other one could not
+  do.
 
 HOW THE CODE GETS THERE
 -----------------------
@@ -238,6 +247,15 @@ def _run(remote, *, instance_id, token, command, budget_seconds, tmp_dir,
     if not parsed.get('ok'):
         raise PodHubError(str(parsed.get('error') or 'the pod transfer failed'))
     return parsed
+
+
+# The pod-side executor is not Hugging Face-specific: ship what the program
+# needs, run ONE command, read ONE result line. `pod_checkpoint_push` runs its
+# probe and assembly programs through this exact function rather than becoming a
+# second `execute_command` caller — two implementations of "what does a failure
+# on a rented pod look like" is the kind of divergence that only ever shows up
+# in production, on the machine nobody can attach a debugger to.
+run_program = _run
 
 
 def push_master(remote, *, instance_id, src_path, repo_id, path_in_repo,

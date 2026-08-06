@@ -23,7 +23,7 @@ from ..services import face_mask_preview as fmp
 from ..models import FaceDatasetImage
 from ..services import lora_training as lt
 from ..services import zimage_convert as zc
-from ..utils.comfyui import get_zimage_models, get_checkpoint_models
+from ..utils.comfyui import get_zimage_models, get_checkpoint_models, get_krea_models
 from ._common import _map_error
 
 bp = Blueprint('training', __name__, url_prefix='/api')
@@ -428,7 +428,7 @@ def dataset_train_checkpoints(dataset_id):
     if variant:
         kw['variant'] = variant
     from ..models import CloudTrainingRun
-    from ..services import checkpoint_registry
+    from ..services import checkpoint_registry, dense_artifacts
     ds = svc.get_dataset(LOCAL_USER, dataset_id)
     fam_resolved = lt._train_type(ds, fam)
     # Retrofit for datasets trained BEFORE the provenance registry existed:
@@ -470,6 +470,14 @@ def dataset_train_checkpoints(dataset_id):
                         dataset_id, train_type=fam_resolved, variant=variant),
                     'recommended_steps_info': lt.recommended_steps_info(
                         dataset_id, train_type=fam_resolved, variant=variant),
+                    # FULL MODELS — a second lane in the same panel, deliberately
+                    # not folded into the two above. Those deploy LoRA adapters
+                    # into loras/<family>; a 26 GB transformer is not an adapter
+                    # and must not inherit the adapter's verbs (see
+                    # cloud_checkpoint_groups' guard, which stays). Additive: an
+                    # older frontend simply ignores the key.
+                    'dense_models': dense_artifacts.list_dense_models(
+                        dataset_id, fam_resolved),
                     'imported': lt.list_imported_checkpoints(LOCAL_USER, dataset_id, family=fam),
                     'disk_usage': lt.dataset_disk_usage(LOCAL_USER, dataset_id, **kw),
                     # provenance: latest registered dataset version vs the
@@ -720,6 +728,95 @@ def dataset_face_mask_preview_status(dataset_id):
                     **fmp.snapshot(dataset_id, fp)})
 
 
+def _krea_installed_bases():
+    """Every Krea 2 checkpoint on this machine, as TRAINING base entries.
+
+    The Studio and the trainer address a model with two different — and both
+    legitimate — vocabularies, so this is a translation, not a shortcut:
+
+    * the Studio picker speaks ComfyUI-relative loader names (``Krea\\x.safetensors``)
+      because it hands them to a ComfyUI running on this machine;
+    * the trainer reads a base value through ``lt._is_custom_weights`` — an
+      ABSOLUTE path means "custom weights, load this file", a RELATIVE name means
+      "a catalog entry the app installed" (Z-Image merges, the SDXL whitelist,
+      both of which have their own resolver), and ``''`` means the official base.
+      Krea has no relative-name resolver: ``foreign_base_reason`` classifies a
+      relative value on Krea as another family's base and the run silently falls
+      back to the official weights. The trainer can also run on a REMOTE pod that
+      must RECEIVE the file, which is why an absolute local path is the right
+      currency there and a ComfyUI folder name is not.
+
+    So: scan with the Studio's scanner (`get_krea_models` — no fifth scanner),
+    then resolve each name to the concrete file through the same search roots
+    ComfyUI itself uses. A name that resolves to nothing is DROPPED rather than
+    emitted relative: offering a value the trainer would quietly ignore is worse
+    than a shorter list.
+
+    Each entry also carries what the picker must say about the file before it is
+    chosen (`model_integrity.training_base_advisory`): a packed inference export
+    is not trainable and says why, a bare fp8 cast is trainable and says what it
+    costs. Header-only and cached per (path, mtime, size).
+    """
+    from ..services import comfy_model_paths
+    from ..services import model_integrity
+    out = []
+    for rel in (get_krea_models() or []):
+        path = comfy_model_paths.resolve_model_file('diffusion_models', rel)
+        if not path:
+            continue
+        advisory = model_integrity.training_base_advisory(path)
+        out.append({
+            'value': path,
+            'label': os.path.basename(str(rel).replace('\\', '/')).rsplit('.', 1)[0],
+            'trainable': advisory['trainable'],
+            'quantization': advisory['form'],
+            'note': advisory['note'],
+        })
+    return out
+
+
+@bp.get('/train/base-file-advisory')
+def train_base_file_advisory():
+    """The verdict a LISTED base already carries, for a path the user TYPED.
+
+    « Custom weights… » is a free text field, and until now the only thing that
+    ever read the file was the save and the launch. So the one base nobody can
+    pick from a list — a checkpoint downloaded five minutes ago, the exact case
+    the field exists for — was also the only one whose "this is a packed export,
+    the trainer cannot load it" arrived after the dataset had been exported and,
+    on the cloud lane, after a GPU had been rented. Same answer, same wording,
+    same `model_integrity.training_base_advisory` — just at typing time.
+
+    Read-only and header-only, and it never echoes the path back: the reply
+    carries the BASENAME, because these payloads end up in pasted diagnostics.
+    `status` is `ok` / `missing` / `not_a_model`; a file it cannot inspect is
+    reported as such and never as a refusal — refusing a base nobody could read
+    would be worse than the failure it prevents.
+    """
+    from ..services import model_integrity
+    raw = (request.args.get('path') or '').strip().strip('"')
+    if not raw:
+        return jsonify({'status': 'missing', 'trainable': True, 'note': None}), 200
+    name = os.path.basename(raw.replace('\\', '/'))
+    if not name.lower().endswith(('.safetensors', '.sft')):
+        # .gguf is loadable by ComfyUI and NOT by a trainer; anything else is not
+        # a single-file checkpoint at all. Both are "not a base", said the same way.
+        return jsonify({'status': 'not_a_model', 'filename': name,
+                        'trainable': False, 'level': 'error', 'quantization': '',
+                        'note': f'{name} is not a .safetensors checkpoint — training '
+                                f'needs a single-file model in that format.'}), 200
+    if not os.path.isfile(raw):
+        return jsonify({'status': 'missing', 'filename': name, 'trainable': False,
+                        'level': 'error', 'quantization': '',
+                        'note': f'{name} is not at that path.'}), 200
+    advisory = model_integrity.training_base_advisory(raw)
+    return jsonify({'status': 'ok', 'filename': name,
+                    'trainable': advisory['trainable'],
+                    'level': advisory['level'],
+                    'quantization': advisory['form'],
+                    'note': advisory['note']}), 200
+
+
 @bp.get('/dataset/<int:dataset_id>/train/base-info')
 def dataset_train_base_info(dataset_id):
     """Bases entraînables (officielle + merges Z-Image), base/variante choisies du
@@ -743,9 +840,12 @@ def dataset_train_base_info(dataset_id):
         name = c['name'] if isinstance(c, dict) else c
         sdxl_bases.append({'value': name,
                            'label': name.replace('\\', '/').split('/')[-1].rsplit('.', 1)[0]})
-    # Krea 2 : base officielle fixe (pas de checkpoint custom, pas de conversion) ; le
-    # choix Raw/Turbo se fait via le sélecteur `variant`, pas ici → label neutre.
-    krea_bases = [{'value': '', 'label': 'Official - Krea 2'}]
+    # Krea 2 : la base officielle (le choix Raw/Turbo se fait via le sélecteur
+    # `variant`, pas ici → label neutre) PUIS tout checkpoint Krea 2 installé sur
+    # cette machine — un modèle que l'utilisateur vient d'entraîner, un build
+    # communautaire. Même scanner que le Studio (get_krea_models), pas un
+    # cinquième : leur divergence a déjà produit un bug.
+    krea_bases = [{'value': '', 'label': 'Official - Krea 2'}] + _krea_installed_bases()
     # Flux : base officielle fixe (FLUX.1-dev, gated HF) — pas de checkpoint custom ni
     # de conversion. Entrée explicite pour que l'UI n'aille PAS retomber sur les bases
     # Z-Image (fallback `bases_by_type[type] || bases`) quand la famille est Flux.
@@ -1818,6 +1918,60 @@ def tools_fp8_deliver_cancel():
                     **(fp8_local_delivery.status() or {})})
 
 
+# --- full models: the fp8 twin's last mile, and the trash -------------------------
+# The master is NEVER sent to ComfyUI. It is 26 GB of a model folder to do a job
+# the ~13 GB twin does better, and it is the only file that can be trained again.
+# That asymmetry is the whole point of this lane, so it lives in the routes too:
+# there is no endpoint here that could deploy a master, not even by mistake.
+
+@bp.post('/dataset/<int:dataset_id>/train/dense/send-plan')
+def dataset_dense_send_plan(dataset_id):
+    """What "Send to ComfyUI" would do — link or copy, where, at what cost.
+    Always 200: a refusal is a disabled button carrying its reason."""
+    from ..services import dense_artifacts
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    d = request.get_json(silent=True) or {}
+    return jsonify(dense_artifacts.send_plan(dataset_id, d.get('run_id')))
+
+
+@bp.post('/dataset/<int:dataset_id>/train/dense/send')
+def dataset_dense_send(dataset_id):
+    from ..services import dense_artifacts
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    d = request.get_json(silent=True) or {}
+    try:
+        info = dense_artifacts.send_to_comfyui(
+            current_app._get_current_object(), dataset_id, d.get('run_id'))
+    except Exception as e:
+        return _map_error(e)
+    return jsonify({'ok': True, **info, 'job': dense_artifacts.status()})
+
+
+@bp.get('/tools/dense-send/status')
+def tools_dense_send_status():
+    """Global, like the fp8 job's: one send at a time, and it outlives the tab."""
+    from ..services import dense_artifacts
+    return jsonify({'ok': True, **(dense_artifacts.status() or {})})
+
+
+@bp.post('/dataset/<int:dataset_id>/train/dense/delete')
+def dataset_dense_delete(dataset_id):
+    """Move ONE of a full model's files to the app trash — recoverable on
+    purpose: these cost hours of GPU, and a mis-click must not be final."""
+    from ..services import dense_artifacts
+    if not svc.get_dataset(LOCAL_USER, dataset_id):
+        return jsonify({'error': 'not found'}), 404
+    d = request.get_json(silent=True) or {}
+    try:
+        out = dense_artifacts.delete_artifact(
+            dataset_id, d.get('run_id'), d.get('filename'))
+    except Exception as e:
+        return _map_error(e)
+    return jsonify({'ok': True, **out})
+
+
 @bp.post('/cloud/quantize/plan')
 def cloud_quantize_plan():
     """Cost, duration cap and storage impact of quantizing a delivered artifact
@@ -2001,10 +2155,30 @@ def dataset_train_cloud_continue():
                                     from_step=d.get('from_step'),
                                     overrides=d.get('overrides'),
                                     resume_mode=d.get('resume_mode', 'weights_only'),
-                                    state_bundle_id=d.get('state_bundle_id'))
+                                    state_bundle_id=d.get('state_bundle_id'),
+                                    transport=d.get('transport'))
     except Exception as e:
         return _map_error(e)
     return jsonify({'ok': True, **res})
+
+
+@bp.post('/dataset/train/cloud/resume-plan')
+def dataset_train_cloud_resume_plan():
+    """The two roads a full model can take back to a pod, with their duration
+    and their GPU cost — answered BEFORE anything is rented, like every other
+    plan endpoint here. Always 200: a road that cannot be taken comes back
+    unavailable with the reason, because a disabled button that explains itself
+    is the whole point of this panel."""
+    gate = _require_cloud()
+    if gate:
+        return gate
+    d = request.get_json(silent=True) or {}
+    try:
+        return jsonify({'ok': True, **ct.dense_resume_plan(
+            LOCAL_USER, int(d.get('run_id') or 0),
+            from_step=d.get('from_step'))})
+    except Exception as e:
+        return _map_error(e)
 
 
 @bp.post('/dataset/train/cloud/recheck-delivery')
@@ -2018,6 +2192,48 @@ def dataset_train_cloud_recheck_delivery():
     except Exception as exc:
         return _map_error(exc)
     return jsonify(result)
+
+
+@bp.post('/dataset/train/cloud/hub-presence')
+def dataset_train_cloud_hub_presence():
+    """Are these runs' Hugging Face repositories still there — asked NOW.
+
+    Deliberately its own endpoint, and deliberately not a field of the
+    checkpoints listing: the panel must paint before anything touches the
+    network, and a Hub outage must never delay a page that is mostly about
+    local files. The panel calls this after it has rendered, and only ever
+    replaces "not re-checked since delivery" with something it measured.
+
+    Cheap by construction — one metadata request per repository, cached with a
+    short TTL in ``hub_presence`` — and never destructive: it reads, and does
+    not rewrite ``artifact_status`` (that record is the delivery's minute, and
+    ``recheck-delivery`` above is the one operation allowed to restate it).
+    """
+    from ..models import CloudTrainingRun
+    from ..services import hub_presence
+
+    body = request.get_json(silent=True) or {}
+    wanted = body.get('run_ids')
+    if not isinstance(wanted, list) or not wanted:
+        return jsonify({'error': 'run_ids is required'}), 400
+    ids = []
+    for value in wanted:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    repo_of = {}
+    for run in CloudTrainingRun.query.filter(CloudTrainingRun.id.in_(ids)).all():
+        if not ct._is_full_transformer_run(run):
+            continue
+        repo = str(ct._run_param(run, 'hf_repo_id') or '').strip()
+        if repo:
+            repo_of[run.id] = repo
+    checked = hub_presence.check_many(repo_of.values(),
+                                      force=body.get('force') is True)
+    return jsonify({'ok': True, 'results': {
+        str(run_id): {**checked[repo], 'run_id': run_id}
+        for run_id, repo in repo_of.items() if repo in checked}})
 
 
 @bp.post('/dataset/train/cloud/fetch-local')
@@ -2224,6 +2440,12 @@ def dataset_train_run_delete(record_id):
     if status == 'has_saves':
         return jsonify({'error': 'This run still has checkpoints on disk. Delete '
                                  'its checkpoints first, then remove the run.'}), 409
+    if status == 'has_model':
+        return jsonify({'error': 'This run trained a full model that is still in '
+                                 'its private Hugging Face repository. Removing '
+                                 'the run would discard the only record of where '
+                                 'that model is. Delete the repository first if '
+                                 'you really want it gone.'}), 409
     if status == 'conflict':
         return jsonify({'error': 'This run is still referenced and could not be '
                                  'removed. Refresh and try again.'}), 409

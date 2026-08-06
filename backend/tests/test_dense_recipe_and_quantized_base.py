@@ -391,6 +391,15 @@ def test_a_plain_bf16_base_is_accepted(tmp_path):
     assert lt.assert_trainable_base_file(path)['quantized'] is False
 
 
+# The refusal is scoped to the STRUCTURED form, and each form gets its own test:
+# what makes a base unusable is the presence of loader-breaking extra KEYS, never
+# the bit width of the payload. Read from the installed ai-toolkit Krea 2 loader,
+# which casts the state dict and then calls load_state_dict(..., strict=True):
+# unknown keys raise there, immediately; a bare cast has none and is up-cast to
+# the training dtype. Same conclusion in musubi-tuner's docs (`--fp8_base` alone
+# trains, a `--fp8_scaled` checkpoint needs converting back first).
+
+
 def test_a_comfyui_scaled_fp8_export_is_refused(tmp_path):
     """The legacy marker alone is decisive — dtype counts never even matter."""
     path = _write_safetensors_header(tmp_path / 'q.safetensors', {
@@ -398,8 +407,11 @@ def test_a_comfyui_scaled_fp8_export_is_refused(tmp_path):
         'blocks.0.attn.wq.scale_weight': ('F32', [], 4),
         'scaled_fp8': ('F8_E4M3', [2], 2),
     })
-    assert mi.quantization_report(path)['quantized'] is True
-    with pytest.raises(ValueError, match='inference-only quantized export'):
+    report = mi.quantization_report(path)
+    assert report['quantized'] is True
+    assert report['form'] == mi.FORM_STRUCTURED
+    assert report['trainable_as_base'] is False
+    with pytest.raises(ValueError):
         lt.assert_trainable_base_file(path)
 
 
@@ -416,19 +428,65 @@ def test_a_modern_comfy_quant_export_is_refused_by_its_metadata(tmp_path):
     report = mi.quantization_report(path)
     assert report['quantized'] is True
     assert '_quantization_metadata' in report['signals']
-    with pytest.raises(ValueError, match='bf16/fp16 version'):
+    assert report['form'] == mi.FORM_STRUCTURED
+    with pytest.raises(ValueError):
         lt.assert_trainable_base_file(path)
 
 
-def test_a_bare_fp8_cast_is_refused_on_dtype_majority_alone(tmp_path):
+def test_the_refusal_names_the_format_obstacle_and_the_way_out(tmp_path):
+    """Nothing asserted the sentence users actually READ, so nothing would notice
+    it drifting back to "the weights lost the precision a gradient step needs" —
+    a claim the loader disproves, and one that already misled a scoping decision.
+    Semantics, not wording: name the extra keys, name the file to pick instead."""
+    path = _write_safetensors_header(tmp_path / 'q.safetensors', {
+        'blocks.0.attn.wq.weight': ('F8_E4M3', [3072, 3072], 128),
+        'blocks.0.attn.wq.scale_weight': ('F32', [], 4),
+        'scaled_fp8': ('F8_E4M3', [2], 2),
+    })
+    with pytest.raises(ValueError) as excinfo:
+        lt.assert_trainable_base_file(path)
+    message = str(excinfo.value).lower()
+    assert 'scale_weight' in message or 'scaled_fp8' in message, message
+    assert 'load' in message, message
+    assert 'bf16' in message and 'checkpoints' in message, message
+
+
+def test_a_bare_fp8_cast_is_accepted_and_says_what_it_costs(tmp_path):
+    """The shape of the checkpoint this app itself ships as the Krea 2 Turbo
+    default: fp8 payload, F32 norms, the SAME tensor names as the bf16 master.
+    It loads and it trains, so refusing it hid a working path — but it starts
+    from degraded weights, and that is stated with numbers."""
     tensors = {f'blocks.{i}.attn.wq.weight': ('F8_E4M3', [3072, 3072], 128)
                for i in range(20)}
     tensors.update({f'blocks.{i}.norm.scale': ('F32', [3072], 12) for i in range(5)})
     path = _write_safetensors_header(tmp_path / 'cast.safetensors', tensors)
     report = mi.quantization_report(path)
     assert report['signals'] == ['majority_quantized_dtypes']
-    with pytest.raises(ValueError):
-        lt.assert_trainable_base_file(path)
+    assert report['form'] == mi.FORM_BARE_CAST
+    assert report['quantized'] is True, 'still not a full-precision file'
+    assert report['trainable_as_base'] is True
+    assert lt.assert_trainable_base_file(path)['form'] == mi.FORM_BARE_CAST
+    warning = mi.base_precision_warning(report)
+    assert '20 of its 25 tensors' in warning, warning
+    assert 'F8_E4M3' in warning and 'bf16' in warning
+    # Scope, pinned: the header proves the file is not PACKED, and nothing more.
+    # A real Krea 2 Turbo fp8 build carries two extra `last.*` tensors that
+    # ai-toolkit's final layer does not declare — no header check can know that,
+    # so the sentence must not promise the run will start.
+    assert 'architecture' in warning, warning
+
+
+def test_a_bare_fp8_cast_is_still_refused_by_the_fp8_EXPORTER(tmp_path):
+    """Allowing it as a TRAINING base must not allow quantizing it AGAIN: that
+    doubles the error and produces a file nothing can load. Different question,
+    same report — `quantized` stays the broad answer the exporter reads."""
+    from app.services import fp8_quantize
+    tensors = {f'blocks.{i}.attn.wq.weight': ('F8_E4M3', [3072, 3072], 128)
+               for i in range(20)}
+    tensors.update({f'blocks.{i}.norm.scale': ('F32', [3072], 12) for i in range(5)})
+    path = _write_safetensors_header(tmp_path / 'cast.safetensors', tensors)
+    with pytest.raises(fp8_quantize.QuantizeError, match='already a quantized export'):
+        fp8_quantize.plan(path)
 
 
 def test_an_unreadable_header_is_let_through_rather_than_guessed_at(tmp_path):
@@ -475,8 +533,24 @@ def test_selecting_a_quantized_custom_base_is_refused_at_selection(tmp_path):
     ds = FakeDataset()
     ds.training_mode = 'lora'
     ds.train_type = 'krea'
-    with pytest.raises(ValueError, match='inference-only quantized export'):
+    with pytest.raises(ValueError, match='bf16/fp16'):
         lt._training_selection_candidate(ds, {'base_model': path}, None)
+
+
+def test_selecting_a_bare_fp8_custom_base_goes_through(tmp_path):
+    """The other half of the same seam. Before this, the ONLY files exercised
+    here carried the `scaled_fp8` marker, so the branch that blocked a plain cast
+    was never covered by anything shaped like a real file — and it blocked one of
+    the two most common Krea checkpoints on disk."""
+    tensors = {f'blocks.{i}.attn.wq.weight': ('F8_E4M3', [3072, 3072], 128)
+               for i in range(20)}
+    tensors.update({f'blocks.{i}.norm.scale': ('F32', [3072], 12) for i in range(5)})
+    path = _write_safetensors_header(tmp_path / 'cast.safetensors', tensors)
+    ds = FakeDataset()
+    ds.training_mode = 'lora'
+    ds.train_type = 'krea'
+    selection = lt._training_selection_candidate(ds, {'base_model': path}, None)
+    assert selection['base_model'] == path
 
 
 # --- volet 1: what the pod would actually be told -------------------------------
@@ -613,3 +687,118 @@ def test_no_pod_or_no_repository_is_skipped_not_failed(tmp_path):
         FakeDataset(), _Remote(), instance_id=None, repo_id='me/repo',
         hf_token='t', tmp_dir=str(tmp_path), vast=_Vast(''))
     assert skipped['state'] == 'skipped'
+
+
+# --- volet 4: the base a dense run ACTUALLY trains on ---------------------------
+#
+# These tests exist because "the guard no longer raises" was never the property
+# that mattered. The dense branch used to build its model block from a constant,
+# so lifting the Turbo/custom refusals without rewiring it would have produced a
+# run NAMED Turbo, STAMPED Turbo, and trained on Raw — for hours, on a rented
+# GPU. Each test below reads the emitted `model.name_or_path` (and the
+# provenance stamp beside it), never the absence of an exception.
+
+
+def _dense(variant='base', base_model=None):
+    ds = FakeDataset()
+    ds.train_variant = variant
+    ds.train_base_model = base_model
+    return ds
+
+
+def test_the_dense_config_carries_the_base_the_recipe_names(tmp_path):
+    """Three recipes, three DIFFERENT values in the emitted config."""
+    custom = _bf16_model(tmp_path / 'my-krea.safetensors')
+    emitted = {
+        'raw': _job(_dense('base'))['model']['name_or_path'],
+        'turbo': _job(_dense('turbo'))['model']['name_or_path'],
+        'custom': _job(_dense('base', custom))['model']['name_or_path'],
+    }
+    assert emitted == {'raw': 'krea/Krea-2-Raw',
+                       'turbo': 'krea/Krea-2-Turbo',
+                       'custom': custom}
+    assert len(set(emitted.values())) == 3
+
+
+def test_a_custom_dense_base_wins_over_the_variant(tmp_path):
+    """A local checkpoint IS the base: the Turbo/Raw switch must not override
+    the file the user picked, on either lane."""
+    custom = _bf16_model(tmp_path / 'my-krea.safetensors')
+    assert _job(_dense('turbo', custom))['model']['name_or_path'] == custom
+
+
+def test_the_dense_provenance_stamp_names_the_base_the_config_uses(tmp_path):
+    """The Runs page and ⎘ Share config read this stamp. It used to be the Raw
+    constant, which would now claim "Krea 2 Raw" over a Turbo run."""
+    custom = _bf16_model(tmp_path / 'my-krea.safetensors')
+    for ds in (_dense('base'), _dense('turbo'), _dense('base', custom)):
+        snapshot = lt.launch_settings_snapshot(ds, masked=False)
+        assert snapshot['effective_base'] == _job(ds)['model']['name_or_path']
+    turbo = lt.launch_settings_snapshot(_dense('turbo'), masked=False)
+    assert turbo['effective_base'] == 'krea/Krea-2-Turbo'
+    stamped = lt.launch_settings_snapshot(_dense('base', custom), masked=False)
+    assert stamped['base_weights'] == custom
+    assert 'base_weights' not in lt.launch_settings_snapshot(_dense('base'),
+                                                             masked=False)
+
+
+def test_dense_turbo_loads_no_de_distillation_adapter(tmp_path):
+    """The LoRA lane puts Ostris' training adapter on Turbo; the dense lane must
+    NOT. Nothing un-merges it from a dense save, and a LoRA-shaped subtraction
+    would miss the normalisation tensors a dense run moves anyway."""
+    assert 'assistant_lora_path' not in _job(_dense('turbo'))['model']
+    lora = _dense('turbo')
+    lora.training_mode = 'lora'
+    assert 'assistant_lora_path' in _job(lora)['model']
+
+
+def test_a_scaled_fp8_export_is_still_refused_as_a_dense_base(tmp_path):
+    """The one MECHANICAL limit of this lane, and the one that must survive the
+    two scope refusals being lifted: ai-toolkit loads a base with strict=True
+    and a scaled export carries tensors the architecture never declares."""
+    path = _write_safetensors_header(tmp_path / 'scaled.safetensors', {
+        'blocks.0.attn.wq.weight': ('F8_E4M3', [3072, 3072], 128),
+        'blocks.0.attn.wq.scale_weight': ('F32', [], 4),
+        'scaled_fp8': ('F8_E4M3', [2], 2),
+    })
+    mi.clear_cache()
+    with pytest.raises(ValueError) as excinfo:
+        _job(_dense('base', path))
+    message = str(excinfo.value).lower()
+    assert 'scale_weight' in message or 'scaled_fp8' in message, message
+    assert 'bf16' in message, message
+
+
+def test_a_bare_fp8_cast_is_accepted_as_a_dense_base(tmp_path):
+    """The distinction IS the subject: same tensor names, reduced dtype, the
+    trainer up-casts it. Refusing this one alongside the scaled export would
+    repeat, in the other direction, the mistake this lane is being corrected
+    for."""
+    tensors = {f'blocks.{i}.attn.wq.weight': ('F8_E4M3', [3072, 3072], 128)
+               for i in range(20)}
+    tensors.update({f'blocks.{i}.norm.scale': ('F32', [3072], 12) for i in range(5)})
+    path = _write_safetensors_header(tmp_path / 'cast.safetensors', tensors)
+    mi.clear_cache()
+    assert mi.quantization_report(path)['form'] == mi.FORM_BARE_CAST
+    assert _job(_dense('base', path))['model']['name_or_path'] == path
+
+
+def test_a_relative_dense_base_is_refused_rather_than_ignored(tmp_path):
+    """The LoRA lane silently drops a non-absolute base (it addresses another
+    family's catalog). Silently means "trains something other than what the
+    panel shows", which is the whole defect this lane just fixed."""
+    with pytest.raises(ValueError, match='full path'):
+        _job(_dense('base', 'krea2-turbo-fp8.safetensors'))
+
+
+def test_the_family_and_slider_refusals_survive(tmp_path):
+    off_family = _dense('base')
+    off_family.train_type = 'zimage'
+    with pytest.raises(ValueError, match='only for Krea 2'):
+        _job(off_family)
+
+    slider = _dense('turbo')
+    slider.train_slider = json.dumps({'enabled': True, 'positive': 'a',
+                                      'negative': 'b'})
+    with pytest.raises(ValueError, match='Slider LoRA'):
+        _job(slider)

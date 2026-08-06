@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router';
 import { postJson } from '../api/fetchClient';
 import { useToast } from '../components/common/Toast';
 import { useCapabilities } from '../context/CapabilitiesContext';
+import useHubPresence from '../hooks/useHubPresence';
 import TrainingProgress from '../components/dataset/TrainingProgress';
 import LaunchProgress from '../components/dataset/LaunchProgress';
 import ContinueDialog from '../components/dataset/ContinueDialog';
@@ -33,6 +34,7 @@ import { runsHubContinueLanes } from '../utils/runsHubContinueLanes';
 import {
   canFetchDenseLocally,
   canRecheckFullTransformerDelivery,
+  denseContinueBlocker,
   denseHubBackupView,
   denseLocalArtifactView,
   fullTransformerArtifactFiles,
@@ -210,12 +212,12 @@ function DenseLocalStatus({ run, onFetch, fetching = false }) {
    three shapes (a local copy, a Hub backup, the historical Hub-only delivery)
    and the only way to prove a shape renders is to render it. */
 export function FullArtifactStatus({ run, onRecheck, rechecking = false,
-  onFetch, fetching = false }) {
+  onFetch, fetching = false, presence = null }) {
   const local = denseLocalArtifactView(run);
-  const backup = denseHubBackupView(run);
+  const backup = denseHubBackupView(run, presence);
   // A run delivered here keeps its Hugging Face block only as a BACKUP note:
   // "Full model not found" would be a lie about a model sitting on the disk.
-  const view = backup || (local ? null : fullTransformerArtifactView(run));
+  const view = backup || (local ? null : fullTransformerArtifactView(run, presence));
   const canRecheck = canRecheckFullTransformerDelivery(run) && !!onRecheck;
   if (!view) {
     return <DenseLocalStatus run={run} onFetch={onFetch} fetching={fetching} />;
@@ -480,6 +482,17 @@ export default function CloudRunsPage() {
     return () => { alive = false; clearTimeout(t); };
   }, [poll]);
 
+  // Is each delivered full model STILL on Hugging Face? `artifact_status` is
+  // stamped at delivery and never revisited, so this page happily offered "Open
+  // private model on Hugging Face ↗" on a repository its owner had deleted.
+  // Asked once, after the page has painted, for the dense runs that recorded a
+  // repository — every card renders from the record (dated, past tense) until
+  // and unless this answers.
+  const hubPresence = useHubPresence(
+    [...(data?.actives || []), ...(data?.recent || [])]
+      .filter((r) => isFullTransformerRun(r) && r.hf_repo_id)
+      .map((r) => r.run_id));
+
   // Nudge, once, that a finished run can be continued — resuming from an earlier,
   // less-cooked epoch is the flagship of the Continue dialog and easy to miss.
   useEffect(() => {
@@ -701,6 +714,28 @@ export default function CloudRunsPage() {
   // Only a success closes it, so a refused attempt no longer costs the user the
   // lane, the checkpoint, the step count and the five folded settings.
   const [continueError, setContinueError] = useState(null);
+  // The priced choice of HOW a full model's ~26 GB gets back to a pod. Fetched
+  // when the dialog opens rather than with the run list: it costs a round-trip
+  // and a Hugging Face size lookup, and it is meaningless for a LoRA (which is
+  // small enough that the question never arises). null while it is in flight or
+  // does not apply → the dialog renders no picker and the backend keeps its own
+  // default, which is exactly the behaviour that shipped before.
+  const [transportPlan, setTransportPlan] = useState(null);
+  const loadTransportPlan = async (run) => {
+    setTransportPlan(null);
+    if (!run || !isFullTransformerRun(run) || run.run_id == null) return;
+    try {
+      const plan = await postJson('/api/dataset/train/cloud/resume-plan',
+        { run_id: run.run_id });
+      // Guard against a slow answer landing after the dialog moved on.
+      setTransportPlan((prev) => (plan?.run_id === run.run_id ? plan : prev));
+    } catch {
+      // A missing forecast must not block the resume — the roads still exist
+      // and the backend still refuses the impossible one with its reason. The
+      // dialog simply falls back to its historical no-picker shape.
+      setTransportPlan(null);
+    }
+  };
   const continueRun = (run) => {
     if (isTrainingRecipeReplayBlocked(run)) {
       toast.error('This checkpoint uses an incompatible legacy Z-Image recipe and cannot be continued safely.');
@@ -709,6 +744,7 @@ export default function CloudRunsPage() {
     setContinueInitialStep(null);
     setContinueError(null);
     setContinueRunTarget(run);
+    loadTransportPlan(run);
   };
   // The LOCAL lane of the same gesture: the checkpoint the cloud run left behind
   // was mirrored into this dataset's ai-toolkit run dir, so resuming it here is
@@ -742,7 +778,8 @@ export default function CloudRunsPage() {
     // container that sat UNDER every modal (fixed: Toast.jsx is z-[10000]); its
     // own cost was that a refusal discarded the whole form. Only a success closes
     // it now — a refusal lands inside it, next to the inputs that caused it.
-    if (!run || !payload) { setContinueRunTarget(null); setContinueInitialStep(null); return; }
+    if (!run || !payload) { setContinueRunTarget(null); setContinueInitialStep(null);
+      setTransportPlan(null); return; }
     const local = payload.lane === 'local';
     setContinuing((m) => ({ ...m, [run.run_id]: true }));
     setContinueError(null);
@@ -759,6 +796,7 @@ export default function CloudRunsPage() {
           { run_id: run.run_id, extra_steps: payload.extraSteps,
             from_step: payload.fromStep, overrides: payload.overrides,
             resume_mode: payload.resumeMode || 'weights_only',
+            ...(payload.transport ? { transport: payload.transport } : {}),
             ...(payload.stateBundleId
               ? { state_bundle_id: payload.stateBundleId } : {}) });
       outcome = continueAttemptOutcome(
@@ -775,6 +813,7 @@ export default function CloudRunsPage() {
     setContinueRunTarget(null);
     setContinueInitialStep(null);
     setContinueError(null);
+    setTransportPlan(null);
     toast.success(local
       ? `Continuing from step ${d.resumed_from} → ${d.target_steps} on this machine — ComfyUI paused.`
       : `Continuing from step ${d.resumed_from} → ${d.target_steps} on a fresh pod…`);
@@ -855,6 +894,7 @@ export default function CloudRunsPage() {
     setContinueInitialStep(pill?.step ?? null);
     setContinueError(null);
     setContinueRunTarget(target);
+    loadTransportPlan(target);
   };
 
   /* One HISTORY card. Visual hierarchy: rank 1 = thumbnail + identity chip +
@@ -975,6 +1015,7 @@ export default function CloudRunsPage() {
           {fullModel && (
             <FullArtifactStatus run={run} onRecheck={recheckFullDelivery}
               rechecking={!!recheckingDelivery[run.run_id]}
+              presence={hubPresence[run.run_id] || null}
               onFetch={fetchFullModel} fetching={!!run.dense_fetch_active} />
           )}
           {line && (
@@ -999,18 +1040,21 @@ export default function CloudRunsPage() {
               </button>
             )}
             {/* A LoRA is continued from a checkpoint on this disk; a full model
-                is continued from its Hugging Face copy, which is what
-                `resume_steps` carries for a dense run (the 26 GB file here
-                cannot be handed to a pod). Both open the same dialog. */}
+                is continued from EITHER its Hugging Face copy or the copy on
+                this computer, which is what `resume_steps` carries for a dense
+                run. The dialog prices both roads before the click, because a
+                26 GB upload bills a rented GPU for every minute it takes. */}
             {run.source === 'cloud' && (fullModel
               ? (run.resume_steps || []).length > 0
               : (run.status === 'done' && run.checkpoint_ready)) && (
               <button type="button" onClick={() => continueRun(run)}
-                disabled={isTrainingRecipeReplayBlocked(run) || !!continuing[run.run_id]}
+                disabled={isTrainingRecipeReplayBlocked(run) || !!continuing[run.run_id]
+                  || !!(fullModel && denseContinueBlocker(run, hubPresence[run.run_id]))}
                 title={isTrainingRecipeReplayBlocked(run)
                   ? 'Disabled: this legacy/incompatible Z-Image checkpoint cannot be continued safely; start a fresh run'
                   : fullModel
-                    ? "Resume this full model from its Hugging Face copy, on a fresh pod"
+                    ? (denseContinueBlocker(run, hubPresence[run.run_id])
+                      || "Resume this full model on a fresh pod — pick how its 26 GB gets there")
                     : "Resume from any of this run's checkpoints for more steps, on a fresh pod"}
                 className="px-3 py-1.5 rounded-lg bg-sky-600/80 hover:bg-sky-600 text-white text-xs font-semibold disabled:opacity-40">
                 {continuing[run.run_id] ? '▶ Continuing…' : '▶ Continue…'}
@@ -1253,6 +1297,7 @@ export default function CloudRunsPage() {
               {isFullTransformerRun(run) && (
                 <FullArtifactStatus run={run} onRecheck={recheckFullDelivery}
                   rechecking={!!recheckingDelivery[run.run_id]}
+                  presence={hubPresence[run.run_id] || null}
                   onFetch={fetchFullModel} fetching={!!run.dense_fetch_active} />
               )}
 
@@ -1429,6 +1474,7 @@ export default function CloudRunsPage() {
               : [continueRunTarget.steps]).filter(Boolean)).map((step) => ({ step }))}
           initialFromStep={continueInitialStep}
           lanes={continueLanes}
+          transportPlan={transportPlan}
           settings={{ optimizer: continueRunTarget.settings?.optimizer,
             learning_rate: continueRunTarget.settings?.lr }}
           busy={!!continuing[continueRunTarget.run_id]}

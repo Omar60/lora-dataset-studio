@@ -19,6 +19,7 @@ import { refreshDatasetIfActive } from '../utils/datasetRefresh';
 import { ENGINE_LABELS } from '../components/dataset/engineSelection.js';
 import { retryRequestForReferenceEdit } from '../components/dataset/referenceEdit.js';
 import { classifyResultMessage } from '../components/dataset/classifyFramingGate.js';
+import { captionResultSuffix } from '../utils/captionEngines.js';
 
 function post(url, body, isForm) {
   // Routes through the shared fetchWithCsrfRetry: a token that aged out mid-session
@@ -149,6 +150,14 @@ export function useDataset() {
   const [busy, setBusy] = useState(false);
   // Tracks an in-flight captioning pass so the UI can poll progressively.
   const [captioning, setCaptioning] = useState(false);
+  // WHO wrote the captions of the last pass: {datasetId, captioned, engines}. The
+  // default 'auto' backend chains JoyCaption and the Ollama vision model, which write
+  // in visibly different styles, and the app used to report only a count — so
+  // "these captions read nothing like yesterday's" had no answer anywhere. The
+  // dataset id rides along so the line can never describe another dataset's run; it
+  // is in-session only (deliberately NOT persisted — see the follow-up note in
+  // utils/captionEngines.js).
+  const [lastCaptionRun, setLastCaptionRun] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [watermarking, setWatermarking] = useState(false);
   // Per-image cache-bust versions (M1): only the cropped image reloads,
@@ -260,6 +269,17 @@ export function useDataset() {
     const id = setInterval(() => refresh(currentId), 2000);
     return () => clearInterval(id);
   }, [captioning, currentId, refresh]);
+
+  // Same poller for a watermark scan, and it is not decoration: `hasActivity`
+  // below only starts once a refresh has ALREADY seen activity ≠ null, and
+  // findWatermarks does not refresh until the pass ends. So in the tab that
+  // launched the scan the "Scanning… N/M" counter never moved and a ⏹ Stop
+  // button in the banner would never appear at all.
+  useEffect(() => {
+    if (!watermarking || !currentId) return undefined;
+    const id = setInterval(() => refresh(currentId), 2000);
+    return () => clearInterval(id);
+  }, [watermarking, currentId, refresh]);
 
   // Persistence layer: a server-side batch (watermark detect/clean, caption,
   // re-caption, analyze faces, classify) advertises itself in the payload's
@@ -585,8 +605,9 @@ export function useDataset() {
         toast.error([d.error, d.detail].filter(Boolean).join(' — ') || 'Unexpected error');
         return;
       }
+      setLastCaptionRun({ datasetId: currentId, captioned: d.captioned, engines: d.engines });
       if (d.stopped) toast.info(`Stopped — ${d.captioned} captioned before you stopped; the rest stays uncaptioned.`);
-      else toast.success(`${d.captioned} captioned`);
+      else toast.success(`${d.captioned} captioned${captionResultSuffix(d.engines)}`);
       await refresh();
     } finally {
       setCaptioning(false);
@@ -604,8 +625,9 @@ export function useDataset() {
         toast.error([d.error, d.detail].filter(Boolean).join(' — ') || 'Unexpected error');
         return;
       }
+      setLastCaptionRun({ datasetId: currentId, captioned: d.captioned, engines: d.engines });
       if (d.stopped) toast.info(`Stopped — ${d.captioned} re-captioned before you stopped; the rest keeps its previous caption.`);
-      else toast.success(`${d.captioned} re-captioned`);
+      else toast.success(`${d.captioned} re-captioned${captionResultSuffix(d.engines)}`);
       await refresh();
     } finally {
       setCaptioning(false);
@@ -649,7 +671,8 @@ export function useDataset() {
         toast.error(d.detail ? `${d.error} — ${d.detail}` : (d.error || 'Could not re-caption'));
         return d;
       }
-      toast.success(`${d.captioned} re-captioned`);
+      setLastCaptionRun({ datasetId: currentId, captioned: d.captioned, engines: d.engines });
+      toast.success(`${d.captioned} re-captioned${captionResultSuffix(d.engines)}`);
       await refresh();  // re-pulls captions + the live leak flags (scan is server-side)
       return d;
     } finally {
@@ -724,19 +747,53 @@ export function useDataset() {
     }
   }, [data, refresh, toast]);
 
-  // Watermark scan (Qwen3-VL, GPU window). Marks kept images with an overlaid
-  // watermark → 🚩 badges + a "Clean (N)" button. Deletes nothing.
-  const findWatermarks = useCallback(() => wrap(async () => {
+  // Watermark scan. WHICH detector runs follows Settings ▸ Captioning & quality ▸
+  // Watermark detection; the server answers with the route it actually took, so a
+  // pinned detector that could not run says so instead of quietly changing nothing.
+  // Marks kept images with an overlaid watermark → 🚩 badges + a "Clean (N)"
+  // button. Deletes nothing. { includeDismissed: true } re-examines the images
+  // ruled false positives — the only way to re-judge them under a new detector.
+  const findWatermarks = useCallback((options) => wrap(async () => {
+    const includeDismissed = !!(options && options.includeDismissed);
     setWatermarking(true);
     try {
-      const d = await postJson(`/api/dataset/${currentId}/watermarks/detect`);
+      const d = await postJson(`/api/dataset/${currentId}/watermarks/detect`,
+        includeDismissed ? { include_dismissed: true } : undefined);
       if (!d.ok) { toast.error(d.error || 'Unexpected error'); return; }
-      toast.success(`${d.detected || 0} watermark(s) found · ${d.none || 0} clean (of ${d.checked || 0})`);
+      const engine = d.backend === 'detector' ? 'watermark detector' : 'vision model';
+      const head = d.stopped ? 'Stopped —' : '';
+      toast.success(`${head} ${d.detected || 0} watermark(s) found · ${d.none || 0} clean `
+        + `(of ${d.checked || 0}, ${engine})`.trim());
+      // A silent fallback is the failure mode this setting exists to remove: say
+      // what ran and where to install what was asked for. Its own toast, because
+      // it is a different fact from the count and must not be skimmed past.
+      if (d.backend_note) toast.info(d.backend_note);
+      // Flagged with no position: only the detector cascade produces this, and
+      // 🧽 Clean cannot route on it. Named here rather than discovered later.
+      if (d.unlocated) {
+        toast.info(`${d.unlocated} flagged without a position — open 🔍 Review flagged `
+          + 'and draw the zone, or Clean will leave them untouched.');
+      }
       await refresh();
     } finally {
       setWatermarking(false);
     }
   }), [wrap, currentId, refresh, toast]);
+
+  // Graceful Stop for a running watermark scan — same contract as the captioning
+  // Stop: the worker checks a flag between images, so the current image finishes,
+  // every verdict already written is KEPT, and a later 🧽 Find picks up the rest
+  // (detect re-examines every kept row on each pass).
+  const cancelWatermarkScan = useCallback(async () => {
+    const d = await postJson(`/api/dataset/${currentId}/watermarks/detect/cancel`, {});
+    if (d.ok) {
+      toast.info('Stopping after the current image… what is already flagged is kept.');
+      await refresh();   // pull activity.cancelling so the button flips immediately
+    } else {
+      // 409 = the scan already finished on its own between the poll and the click.
+      toast.error(d.error || 'Nothing to stop');
+    }
+  }, [currentId, refresh, toast]);
 
   // Clean the detected watermarks: border marks are CROPPED, small off-center ones
   // INPAINTED (LaMa), the rest flagged for manual review. The backend resolves the
@@ -1538,12 +1595,13 @@ export function useDataset() {
 
 
   return { datasets, currentId, data, busy: busyLive, localBusy: busy, captioning: captioningLive,
+           lastCaptionRun,
            analyzing: analyzingLive, watermarking: watermarkingLive, activity,
            nonces, mirroringIds, refNonce, scoringFaceIds, recaptioningIds, create, open,
            deleteDataset, updateSettings, setCurrentId, setRef, addExtraRef, removeExtraRef,
            generate, importFiles, scrapeImport, resolveSmallImageRescue, improveImage, reimproveImage, improveBatch, classify, caption, recaption, recaptionImages,
            setStatus, setCaption, mirrorImage, rotateImage, crop, cropRef, cropExtraRef, recropRefAuto, editReference, retryReferenceEdit, canRetryReferenceEdit, keepEditedReference, discardEditedReference, setDatasetTrainType, setDatasetFidelity, deleteImage, batchImages, replaceCaptions, writeCaptionFiles, openDatasetFolder, cancelPending, cancelCaption, regenerate, analyzeFaces, scoreFace,
-           findWatermarks, cleanWatermarks, cleanWatermarkImages, restoreWatermarkImage, dismissWatermarks, saveWatermarkRegions,
+           findWatermarks, cancelWatermarkScan, cleanWatermarks, cleanWatermarkImages, restoreWatermarkImage, dismissWatermarks, saveWatermarkRegions,
            purgeUnused, exportZip, exportBackup, exportZipFor, exportBackupFor, importBackup, importDatasetZip, importDatasetFolder,
            backupEverything, backupJob, downloadBackup, openBackupsFolder, dismissBackup, restoreJob, dismissRestore,
            refresh, train, stopTraining, continueTraining, continueTrainingInCloud,
