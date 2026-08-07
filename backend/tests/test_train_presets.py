@@ -209,6 +209,7 @@ _ORIGINAL_BUILTIN_IDS = set(_QUICK_PRESET_MATRIX.values()) | {
 _APPROVED_BUILTIN_IDS = {
     'builtin-krea-raw-character-balanced',
     'builtin-krea-raw-character-lokr-fast',
+    'builtin-krea-raw-character-16gb',
     'builtin-krea-raw-style-compact',
     'builtin-krea-raw-concept-16gb',
     'builtin-zimage-turbo-character-balanced',
@@ -218,7 +219,7 @@ _APPROVED_BUILTIN_IDS = {
 def test_quick_preset_catalogue_covers_every_family_and_kind(client):
     listed = client.get('/api/train/presets').get_json()['presets']
     builtins = [p for p in listed if p.get('builtin')]
-    assert len(builtins) == 23
+    assert len(builtins) == 24
     assert {p['id'] for p in builtins} == (
         _ORIGINAL_BUILTIN_IDS | _APPROVED_BUILTIN_IDS)
     coverage = {}
@@ -231,6 +232,7 @@ def test_quick_preset_catalogue_covers_every_family_and_kind(client):
         'builtin-krea-character',
         'builtin-krea-raw-lokr-likeness',
         'builtin-krea-raw-character-balanced',
+        'builtin-krea-raw-character-16gb',
         'builtin-krea-raw-character-lokr-fast',
     }
     assert coverage[('krea', 'style')] == {

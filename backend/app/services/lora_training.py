@@ -2237,6 +2237,20 @@ def _content_or_style_fields(ds) -> dict:
             if value in _CONTENT_OR_STYLE_CHOICES else {})
 
 
+def _sampling_disabled(ds) -> bool:
+    """Opt-in kill switch for in-training previews (ai-toolkit `disable_sampling`).
+
+    MEASURED on a 16 GB RTX 5080, Krea 2 Raw at 1024 with masks: the identical run
+    does ~15-18 s/it with sampling off, and with sampling on it stops making
+    progress entirely — one 1024x1024 preview at the Raw settings below (cfg 4,
+    25 steps) took 92 minutes and took the whole desktop down with it. Raw previews
+    are simply not affordable next to a training footprint that already sits near
+    the card's ceiling. Absent = current behaviour (previews on), so only a preset
+    or a user that asks for it pays anything.
+    """
+    return _train_settings(ds).get('disable_sampling') is True
+
+
 def _krea_recipe_fields(ds) -> dict:
     """Optional Krea 2 community-recipe controls for ai-toolkit's TrainConfig.
 
@@ -3475,6 +3489,13 @@ def update_train_settings(user_id, dataset_id, patch: dict, *, _settings=None) -
             cur['mask_faces'] = True
         else:
             cur.pop('mask_faces', None)
+    if 'disable_sampling' in patch:
+        # In-training previews off. Plain opt-in like mask_faces, not tri-state:
+        # the default is "previews on", so falsy just clears the key.
+        if patch['disable_sampling']:
+            cur['disable_sampling'] = True
+        else:
+            cur.pop('disable_sampling', None)
     if 'masked' in patch:
         # Person masking. TRI-STATE, like the memory keys and unlike dual_captions /
         # mask_faces: this lever's default is ON, so an explicit False is a VALUE
@@ -3626,7 +3647,7 @@ TRAIN_SETTING_KEYS = ('rank', 'resolution', 'save_every', 'max_step_saves',
                       'loss_type', 'qtype', 'qtype_te', 'layer_offloading',
                       'layer_offloading_transformer_percent',
                       'layer_offloading_text_encoder_percent',
-                      'cache_text_embeddings', 'save_dtype',
+                      'cache_text_embeddings', 'disable_sampling', 'save_dtype',
                       'preset_steps_per_image', 'preset_steps_min',
                       'preset_steps_max', 'preset_steps_fixed',
                       # The unlocked half of the dense recipe. Present here so a
@@ -3906,6 +3927,81 @@ BUILTIN_TRAIN_PRESETS = [
             'weight_decay': 1e-4,
             'timestep_type': 'sigmoid',
             'content_or_style': 'balanced',
+            'preset_steps_per_image': 50,
+            'preset_steps_min': 2000,
+            'preset_steps_max': 3000,
+        },
+    },
+    {
+        'id': 'builtin-krea-raw-character-16gb',
+        'name': 'Krea 2 Raw · Character (16 GB)',
+        'train_type': 'krea',
+        'dataset_kind': 'character',
+        'variants': ['base', 'raw'],
+        'builtin': True,
+        'approved': True,
+        'community': True,
+        'confidence': 'medium',
+        'evidence_label': 'community-tested',
+        'source_url': (
+            'https://www.reddit.com/r/StableDiffusion/comments/1v9yl1u/'
+            'krea_2_lora_training_the_very_easy_guide_for_16gb/'),
+        'recommended_images': {'min': 40, 'max': 60, 'target': 50},
+        'recommended_steps': {'per_image': 50, 'min': 2000, 'max': 3000},
+        'checkpoint_targets': [1500, 2000, 2500, 3000],
+        'caption_guidance': (
+            'Describe visible identity, pose, framing and lighting; keep the trigger '
+            'consistent and avoid inferred traits.'),
+        'limitations': [
+            'Slow, but only because a 12B DiT on 16 GB is. Measured on an RTX 5080 '
+            'over a real 121-image export at 1024 (largest bucket 896x1168): '
+            '~23 s/it, so 2000 steps is ~13 h and 3000 is ~19 h. Plan an overnight.',
+            'layer_offloading is deliberately OFF. Turning it on at 0.5 was measured '
+            'at ~100-150 s/it on the same card and dataset — 5x slower, with the GPU '
+            'at 98% "utilisation" but only 76 W, i.e. stalled on PCIe rather than '
+            'computing. low_vram alone already fits; adding layer offloading on top '
+            'is double streaming. Only reach for it if this recipe OOMs.',
+            'low_vram must stay ON. Removing it did not OOM but ran SLOWER '
+            '(~24-32 s/it): near the 16 GB ceiling the allocator does worse without '
+            'it, so it is not merely a streaming switch.',
+            'save_every is 250 (the smallest _SAVE_CHOICES allows), not the usual '
+            '500: a 500-step interval is ~3 h of work lost if a chunked run is '
+            'interrupted, against ~1.6 h at 250.',
+            'Schedule and optimizer come from Character Balanced; the memory block '
+            'started from the community 16 GB guide and was then corrected by '
+            'measurement. Memory use is not guaranteed across drivers or ai-toolkit '
+            'revisions.',
+        ],
+        'description': (
+            'Character recipe measured to fit 16 GB: Automagic3, sigmoid and '
+            'Balanced at 1024 with int8 quantisation and low-VRAM streaming, and '
+            'layer offloading deliberately off because it costs 5x for a fit you '
+            'already have. ~23 s/it on an RTX 5080, so ~19 h for 3000 steps.'),
+        'settings': {
+            'resolution': '1024',
+            'save_every': 250,
+            'max_step_saves': 10,
+            'sample_every': 500,
+            'sample_prompts': list(_CHARACTER_SAMPLE_PROMPTS),
+            'optimizer': 'automagic3',
+            'learning_rate': 1e-4,
+            'weight_decay': 1e-4,
+            'timestep_type': 'sigmoid',
+            'content_or_style': 'balanced',
+            # The 16 GB block, corrected by measurement on an RTX 5080 (see
+            # limitations). low_vram + int8 is the whole fit; layer_offloading is
+            # NOT set, because enabling it cost 5x for memory that was not needed.
+            # Leaving the key absent also avoids ai-toolkit's percent default of
+            # 1.0 (config_modules.py L730) — 100% offloading, slower still.
+            'low_vram': True,
+            'cache_text_embeddings': True,
+            # Previews OFF. A Raw preview is cfg 4 / 25 steps, and next to a
+            # training footprint already near the 16 GB ceiling it does not just
+            # cost time — the run stops progressing after it. Compare against
+            # Turbo once the LoRA is out instead.
+            'disable_sampling': True,
+            'qtype': 'int8',
+            'qtype_te': 'int8',
             'preset_steps_per_image': 50,
             'preset_steps_min': 2000,
             'preset_steps_max': 3000,
@@ -5397,6 +5493,7 @@ def _build_job_config_krea(ds, dataset_folder: str, steps: int, training_folder=
                     **_lr_sched_fields(ds),
                     **_ema_fields(ds),
                     **_krea_recipe_fields(ds),
+                    **({'disable_sampling': True} if _sampling_disabled(ds) else {}),
                 },
                 'model': model,
                 'sample': {
