@@ -14,6 +14,7 @@ import DockerUpdateInstructions from './components/common/DockerUpdateInstructio
 import PinokioUpdateInstructions from './components/common/PinokioUpdateInstructions'
 import DatasetPage from './pages/DatasetPage'
 import BankPage from './pages/BankPage'
+import VideoBankPage from './pages/VideoBankPage'
 import StudioPage from './pages/StudioPage'
 import SettingsPage from './pages/SettingsPage'
 import SetupPage from './pages/SetupPage'
@@ -432,7 +433,7 @@ function UpdateBanner() {
 
 function Shell() {
   const { pathname } = useLocation();
-  const canvasRoute = pathname === '/canvas';
+  const wideWorkspaceRoute = pathname === '/canvas' || pathname === '/bank';
   return (
     <>
       <NavBar />
@@ -449,7 +450,7 @@ function Shell() {
       <ComfyRecoveryBanner />
       <UpdateBanner />
       <main id="main-content" tabIndex={-1}
-        className={canvasRoute
+        className={wideWorkspaceRoute
           ? 'mx-auto w-full max-w-[1800px] px-3 py-4 sm:px-4 sm:py-6'
           : 'mx-auto max-w-5xl px-4 py-6'}>
         <Outlet />
@@ -482,6 +483,11 @@ function AppInner() {
             <Route path="/" element={<Navigate to="/datasets" replace />} />
             <Route path="/datasets" element={<DatasetPage />} />
             <Route path="/bank" element={<BankPage />} />
+            {/* Its OWN route rather than a sixth nav item: the desktop bar
+                already overflows at 768 px with five workspaces, and these are
+                two kinds of material for one job — the lane switch lives on both
+                bank pages (components/videobank/BankLaneTabs). */}
+            <Route path="/video-bank" element={<VideoBankPage />} />
             <Route path="/guide" element={<GuidePage />} />
             <Route path="/guide/getting-help" element={<Navigate to="/help" replace />} />
             <Route path="/guide/:section" element={<GuidePage />} />

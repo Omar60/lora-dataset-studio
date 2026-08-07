@@ -24,6 +24,8 @@ import ReferenceEditModal from './ReferenceEditModal';
 import { defaultEditEngine } from './referenceEdit';
 import { localEngineUnavailableReason, hasComfyui } from '../../utils/localEngineReason.js';
 import { captionEnginesSummary, CAPTION_ENGINE_WHY } from '../../utils/captionEngines.js';
+// …and the per-image half of the same question, for the captions listed in full here.
+import { captionOriginInfo } from '../../utils/captionOrigin.js';
 import { extraRefCropSource } from './extraRefs';
 import DatasetLightbox from './DatasetLightbox';
 import DatasetSettingsModal from './DatasetSettingsModal';
@@ -259,6 +261,11 @@ export default function DatasetWorkspace({ ds, onBack }) {
   // Filename of the extra reference being cropped (extras have no numeric id).
   const [extraRefCrop, setExtraRefCrop] = useState(null);
   const [viewImg, setViewImg] = useState(null);
+  const [gridBulkBusy, setGridBulkBusy] = useState(false);
+  useEffect(() => {
+    if (gridBulkBusy) setViewImg(null);
+  }, [gridBulkBusy]);
+  useEffect(() => { setGridBulkBusy(false); }, [d?.id]);
   const [captionMode, setCaptionMode] = useState(null);   // null → défaut auto selon train_type
   const [showLeaks, setShowLeaks] = useState(false);       // liste dépliée des captions qui fuient
   const [captionToolsOpen, setCaptionToolsOpen] = useState(false);
@@ -810,7 +817,13 @@ export default function DatasetWorkspace({ ds, onBack }) {
             || act.kind === 'improve'
             // Editing the reference is an API call (ChatGPT / Nano Banana) — no GPU,
             // ComfyUI is never touched, so never claim it is paused.
-            || act.kind === 'edit_reference';
+            || act.kind === 'edit_reference'
+            // Dataset → Bank is a reserved filesystem copy. It blocks edits to
+            // keep one coherent source generation, but does not touch the GPU.
+            || act.kind === 'bank_export'
+            || act.kind === 'bank_import'
+            || act.kind === 'training_export'
+            || act.kind === 'backup';
           const label = {
             watermark_detect: `Scanning for watermarks…${prog}`,
             watermark_clean: `Cleaning watermarks…${prog}`,
@@ -821,9 +834,16 @@ export default function DatasetWorkspace({ ds, onBack }) {
             generate: `Generating variations…${prog}`,
             improve: `Queuing improvements…${prog}`,
             edit_reference: 'Editing reference…',
+            bank_export: `Copying into a Bank…${prog}`,
+            bank_import: `Copying images from a Bank…${prog}`,
+            training_export: 'Freezing the Dataset for training…',
+            backup: `Creating portable backup…${prog}`,
           }[act.kind];
           if (label) {
-            const detailed = act.detail || label;
+            // Copy/freeze details are stable phase names, while done/total lives
+            // beside them. Prefer the count-aware labels so progress stays visible.
+            const detailed = ['bank_export', 'bank_import', 'training_export']
+              .includes(act.kind) ? label : (act.detail || label);
             return `${detailed}${cpu ? '' : ' ComfyUI is paused during the pass.'}`;
           }
         }
@@ -1032,15 +1052,28 @@ export default function DatasetWorkspace({ ds, onBack }) {
           horizontal chip rail — same responsive pattern as the Settings page. */}
       <div className="lg:grid lg:grid-cols-[15rem_minmax(0,1fr)] lg:gap-4 lg:items-start">
         <aside>
-          {/* Mobile: horizontal chip rail */}
-          <nav aria-label="Dataset sections" className="-mx-4 overflow-x-auto px-4 pb-2 lg:hidden">
+          {/* Mobile: horizontal chip rail.
+
+              `relative` is NOT decoration — without it the whole page renders
+              at ~73% on a phone. `overflow-x-auto` clips a descendant only when
+              the scroller is also its containing block, and a static box never
+              is. The NavBadge counts carry an `.sr-only` label, which Tailwind
+              implements as `position: absolute` with no offsets: it therefore
+              resolves against the document, keeps its static position out at
+              the far end of a rail 1123 px wide, and escapes the clip. The
+              document then measures ~598 px against a 440 px viewport, mobile
+              Safari shrinks the page to fit, and every bar on screen — header
+              included — draws at 73% of the screen with dead space beside it.
+              Nothing overflows visibly, because the escapee is a 1 px box no
+              one can see. */}
+          <nav aria-label="Dataset sections" className="relative -mx-4 overflow-x-auto px-4 pb-2 lg:hidden">
             <ul className="m-0 flex list-none gap-2 p-0">
               {WORKSPACE_SECTIONS.map((s) => <li key={s.id}>{navItem(s, true)}</li>)}
             </ul>
           </nav>
           {activePanels.length > 0 && (
             <nav aria-label={`${sectionMeta[section].title} destinations`}
-              className="-mx-4 -mt-1 overflow-x-auto px-4 pb-3 lg:hidden">
+              className="relative -mx-4 -mt-1 overflow-x-auto px-4 pb-3 lg:hidden">
               <ul id={`dataset-mobile-panels-${section}`} className="m-0 flex list-none gap-2 p-0">
                 {activePanels.map((destination) => (
                   <li key={destination.id}>{panelNavItem(section, destination, true)}</li>
@@ -1240,6 +1273,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
                   onRegenerate={(id, loraStrength, prompt, opts) => ds.regenerate(id, loraStrength, prompt, opts)}
                   onReimprove={ds.reimproveImage} onView={setViewImg}
                   onBatch={ds.batchImages} busy={ds.busy}
+                  onBulkBusyChange={setGridBulkBusy}
                   onImproveBatch={ds.improveBatch} activity={act}
                           subjectType={d.subject_type || 'human'}
                   eligibilityImages={images}
@@ -1818,6 +1852,18 @@ export default function DatasetWorkspace({ ds, onBack }) {
                                 }}
                                 aria-label={`Caption of image ${img.id}`}
                                 className="w-full bg-app/60 border border-amber-400/30 rounded px-2 py-1 text-[0.6875rem] text-content resize-y" />
+                              {/* WHO WROTE THE LEAKING SENTENCE. This list is read
+                                  caption by caption to decide what to redo, and the
+                                  'auto' backend chains two engines inside one run —
+                                  so "which engine keeps leaking" is answerable here
+                                  and was not. Silent when the author was never
+                                  recorded (that is not "a model wrote it"). */}
+                              {captionOriginInfo(img.caption_origin).known && (
+                                <span className="text-[0.625rem] text-content-subtle"
+                                  title={captionOriginInfo(img.caption_origin).title}>
+                                  {captionOriginInfo(img.caption_origin).short}
+                                </span>
+                              )}
                               <button type="button"
                                 disabled={recaptionLocked}
                                 onClick={() => ds.recaptionImages([img.id], effCaptionMode)}
@@ -2107,7 +2153,7 @@ export default function DatasetWorkspace({ ds, onBack }) {
             : undefined}
           improvePending={viewImgImproving}
           improveReady={viewImgImprovementReady}
-          busy={ds.busy}
+          busy={ds.busy || gridBulkBusy}
           faceThresholds={d.face_thresholds}
           onStatus={viewImgLive._rescueReviewPreview ? undefined : decideViewImg}
           onNavigate={viewImgQueuePosition ? navigateReview : undefined}

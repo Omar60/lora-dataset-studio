@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import requests
 
 from . import config as cfg
+from .services import ffmpeg_tools
 from .utils import comfy_fs
 
 _CACHE_TTL = 30
@@ -37,6 +38,11 @@ _UNKNOWN_TTL = 60
 # answered 'CUDA' to one probe and 'no answer' to the other.
 _IMPORT_TIMEOUT = 90
 _import_cache = {}  # key -> (ts, ok|None)  — None = unknown, kept briefly
+# These two probes guard workers that are deliberately launched with ``python
+# -s``.  Keep the isolation scoped: Face, Masks and Watermark still honour their
+# configured interpreter's normal site policy, so probing them with different
+# argv would create a false negative.
+_NO_USER_SITE_IMPORT_KEYS = frozenset(('bank_scoring', 'bank_scoring_gpu'))
 
 _ZIMAGE_RE = re.compile(r'z[ -]?image', re.IGNORECASE)
 # Aligned with klein_edit_helper / utils.comfyui (was missing '.sft', so the
@@ -89,14 +95,22 @@ def _http_ok(url, timeout=3, reason=None, *, readiness=False) -> bool:
                 close()
 
 
-def _import_ok(python: str, module_expr: str, timeout=_IMPORT_TIMEOUT):
+def _import_ok(python, module_expr: str, timeout=_IMPORT_TIMEOUT):
     """True/False = the import deterministically succeeded/failed. None = TIMEOUT —
     unknown, NOT a proven absence. The very first `import rembg` after an install
     compiles numba/scikit-image caches while the antivirus scans 40 MB of fresh
     DLLs: measured ~20 s cold vs ~1 s warm — a 20 s timeout read as False showed
-    'Person masks ✗' for 10 min right after a SUCCESSFUL install."""
+    'Person masks ✗' for 10 min right after a SUCCESSFUL install.
+
+    ``python`` is normally one executable path.  The cache layer may pass an
+    argv prefix such as ``(python, '-s')`` when that feature's real worker uses
+    the same isolated contract.
+    """
     try:
-        result = subprocess.run([python, '-c', module_expr], capture_output=True, timeout=timeout)
+        prefix = (list(python) if isinstance(python, (tuple, list))
+                  else [python])
+        result = subprocess.run(
+            [*prefix, '-c', module_expr], capture_output=True, timeout=timeout)
         return result.returncode == 0
     except subprocess.TimeoutExpired:
         return None
@@ -123,7 +137,9 @@ def _cached_import_state(key: str, python: str, module_expr: str):
         ttl = _IMPORT_TTL if cached[1] is not None else _UNKNOWN_TTL
         if now - cached[0] < ttl:
             return cached[1]
-    ok = _import_ok(python, module_expr)
+    probe_python = ((python, '-s')
+                    if key in _NO_USER_SITE_IMPORT_KEYS else python)
+    ok = _import_ok(probe_python, module_expr)
     _import_cache[cache_key] = (now, ok)
     return ok
 
@@ -667,6 +683,8 @@ CAPABILITY_IMPORTS = {
     'face_scoring': 'import insightface, onnxruntime',
     'masks': 'import rembg',
     'bank_scoring': 'import torch, open_clip, transformers',
+    'bank_siglip2': ('import torch, transformers, numpy; from PIL import Image; '
+                     'from transformers import Siglip2Model, AutoProcessor'),
     'watermark_inpaint': 'import simple_lama_inpainting',
     # The detector extra runs backend/infer/watermark_detect_infer.py, which needs
     # torch (both models) and transformers (BOTH heads are transformers-native —
@@ -674,6 +692,17 @@ CAPABILITY_IMPORTS = {
     # trust_remote_code file no longer loads). Nothing else: no einops, no
     # flash-attn, no vendored modelling code.
     'watermark_detect': 'import torch, transformers',
+    # The video lane is TWO extras, because its two halves belong in two different
+    # environments. PyAV is imported IN-PROCESS by Flask (probing a file, pulling a
+    # thumbnail frame), so it has to live in the app's own interpreter and stays
+    # small. TransNetV2 drags torch, so it rides the environment bank scoring
+    # already manages — the same call the watermark detector made, for the same
+    # ~2.5 GB reason. ffmpeg is not an import at all and is resolved separately
+    # (services/ffmpeg_tools).
+    'video': 'import av',
+    # av: the worker decodes with PyAV in this same environment — a probe that
+    # skips it answers "ready" about a detector that cannot open a single file.
+    'shot_detect': 'import torch, transnetv2_pytorch, av',
 }
 
 
@@ -722,10 +751,62 @@ def bank_scoring_gpu_available() -> bool:
     return state
 
 
+def bank_siglip2_gpu_available() -> bool:
+    """True only when the resolved SigLIP2 interpreter proves CUDA works.
+
+    Unlike Score, the parent sends an explicit device to the SigLIP2 child. An
+    unanswered probe must therefore resolve to CPU: guessing CUDA from the host
+    card (or from Score's borrowed runtime) would tell a CPU-only managed torch
+    build to use a device it cannot open.
+    """
+    from .services import bank_semantic_models as assets
+    state = _cached_import_state(
+        'bank_siglip2_gpu', assets.semantic_python(),
+        'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)')
+    return state is True
+
+
 def probe_masks() -> dict:
     python = cfg.get('masks.python') or sys.executable
     ok = _cached_import('masks', python, CAPABILITY_IMPORTS['masks'])
     return {'ok': ok, 'detail': 'rembg import OK' if ok else 'import failed'}
+
+
+def probe_video() -> dict:
+    """The video lane, reported as THREE pieces rather than one verdict.
+
+    Decoding, shot detection and encoding fail independently and are fixed
+    differently — one is a pip package, one is a pip package that drags torch, one
+    is a binary. A single "video unavailable" is how a user ends up reinstalling
+    the wrong thing, and it is the exact shape of the defect this lane is meant to
+    avoid: a .mp4 in an image bank is skipped today with no message at all.
+
+    'ok' means a bank can be taken all the way to a dataset. The parts are
+    reported separately so a caller can still offer what does work — with no
+    encoder you can scan, detect and triage, you just cannot export yet.
+    """
+    decode = _cached_import('video_decode', cfg.get('video.python') or sys.executable,
+                            CAPABILITY_IMPORTS['video'])
+    detect = _cached_import(
+        'video_detect',
+        (cfg.get('shot_detect.python') or cfg.get('bank_scoring.python')
+         or sys.executable),
+        CAPABILITY_IMPORTS['shot_detect'])
+    encode = ffmpeg_tools.ffmpeg_path() is not None
+    missing = []
+    if not decode:
+        missing.append('av (video decoding)')
+    if not detect:
+        missing.append('shot detection (transnetv2-pytorch)')
+    if not encode:
+        missing.append('ffmpeg (clip encoding)')
+    return {
+        'ok': bool(decode and detect and encode),
+        'detail': 'video extra ready' if not missing else 'missing: ' + ', '.join(missing),
+        'decode': bool(decode),
+        'detect': bool(detect),
+        'encode': bool(encode),
+    }
 
 
 def probe_bank_scoring() -> dict:
@@ -737,6 +818,30 @@ def probe_bank_scoring() -> dict:
     ok = _cached_import('bank_scoring', python, CAPABILITY_IMPORTS['bank_scoring'])
     return {'ok': ok,
             'detail': 'torch + open_clip + transformers import OK' if ok else 'import failed'}
+
+
+def probe_bank_siglip2() -> dict:
+    """Optional Bank semantic engine: packages AND the pinned local checkpoint.
+
+    Files are checked before importing torch so an install that never requested
+    SigLIP2 does not pay a heavy subprocess probe on every capability poll.
+    """
+    from .services import bank_semantic_models as assets
+    if not assets.weights_present():
+        return {
+            'ok': False,
+            'detail': ('SigLIP2 weights are not downloaded yet '
+                       '(Setup ▸ Quality tools ▸ SigLIP2 semantic engine)'),
+            'model': assets.MODEL_ID,
+        }
+    python = assets.semantic_python()
+    ok = _cached_import('bank_siglip2', python, CAPABILITY_IMPORTS['bank_siglip2'])
+    return {
+        'ok': ok,
+        'detail': ('torch + transformers + Pillow + pinned SigLIP2 weights ready' if ok
+                   else 'weights are present but this transformers build cannot load SigLIP2'),
+        'model': assets.MODEL_ID,
+    }
 
 
 def probe_watermark_inpaint() -> dict:
@@ -858,13 +963,17 @@ def python_ml_status() -> dict:
 def probe_scrape_deps() -> dict:
     """The scraper's optional Python deps (requirements-scrape.txt). find_spec
     only (no import cost): the scrape stack runs IN-PROCESS, so the app's own
-    interpreter is the one that must see the packages. curl_cffi + gallery_dl
-    are the two hard requirements (picazor/civitai fetch, gallery enumeration);
-    bs4/cloudscraper/instaloader ride along in the same install. Every module the
-    scrape stack imports belongs here: an omission reads as "installed" while the
-    source that needs it still raises at runtime (instaloader did, until 2026-07)."""
+    interpreter is the one that must see the packages (or, for gallery_dl /
+    yt_dlp, the one `python -m` re-launches as a subprocess — same interpreter,
+    same site-packages). curl_cffi + gallery_dl are the two hard requirements
+    (picazor/civitai fetch, gallery enumeration); bs4/cloudscraper/instaloader/
+    ddgs/yt_dlp ride along in the same install. Every module the scrape stack
+    imports (directly or via `python -m`) belongs here: an omission reads as
+    "installed" while the source that needs it still raises at runtime
+    (instaloader did, until 2026-07; ddgs and yt_dlp did too, until this fix)."""
     import importlib.util
-    missing = [m for m in ('curl_cffi', 'gallery_dl', 'bs4', 'cloudscraper', 'instaloader')
+    missing = [m for m in ('curl_cffi', 'gallery_dl', 'bs4', 'cloudscraper', 'instaloader',
+                            'ddgs', 'yt_dlp')
                if importlib.util.find_spec(m) is None]
     return {'ok': not missing,
             'detail': 'scrape deps OK' if not missing else f"missing: {', '.join(missing)}"}
@@ -1549,8 +1658,11 @@ def probe(force=False) -> dict:
     face_scoring = probe_face_scoring()
     masks = probe_masks()
     bank_scoring = probe_bank_scoring()
+    bank_siglip2 = probe_bank_siglip2()
     watermark_inpaint = probe_watermark_inpaint()
     watermark_detect = probe_watermark_detect()
+    video = probe_video()
+    scrape_deps = probe_scrape_deps()
     joycaption = probe_joycaption(aitoolkit)
     models = _scan_models()
     # Klein engine readiness is now honest tri-component: the graph needs the UNET
@@ -1798,6 +1910,12 @@ def probe(force=False) -> dict:
         # Bank scoring extra (CLIP aesthetic + NSFW + style clustering). Gates the
         # bank's "Score (aesthetic · NSFW · style)" button; False → install hint.
         'bank_scoring': bank_scoring['ok'],
+        # Optional, user-selected semantic alternative. It is deliberately not
+        # folded into bank_scoring: CLIP aesthetic scoring remains usable without
+        # the additional 1.5 GB checkpoint.
+        'bank_siglip2': bank_siglip2['ok'],
+        'bank_siglip2_detail': bank_siglip2['detail'],
+        'bank_siglip2_model': bank_siglip2['model'],
         # Lets the front adapt the watermark Clean tooltip: when False, Clean is
         # crop-only (LaMa-routed watermarks are skipped with an install hint).
         'watermark_inpaint': watermark_inpaint['ok'],
@@ -1810,6 +1928,16 @@ def probe(force=False) -> dict:
         # The measured flag threshold, published so the panel and the Settings
         # field quote the SAME number the pass will actually use.
         'watermark_detect_threshold': _watermark_detect_threshold(),
+        # The video lane, reported as its three independent pieces. A single
+        # boolean would be a lie here: decoding, shot detection and encoding come
+        # from three different installs and fail apart. The front uses the parts to
+        # say WHICH one to fix — never "video unavailable", which is how a user
+        # reinstalls the wrong thing.
+        'video': video['ok'],
+        'video_detail': video['detail'],
+        'video_decode': video['decode'],
+        'video_detect': video['detect'],
+        'video_encode': video['encode'],
         # Klein-inpaint (V2, quality) readiness = same as the Klein engine (ComfyUI
         # reachable + Klein models on disk). The custom-node preflight is a clean-time
         # 409. Greys the batch's "Klein (quality)" option when False.
@@ -1825,7 +1953,14 @@ def probe(force=False) -> dict:
         # point of the setting is that the rule stops being invisible.
         'dataset_import': _dataset_import_policy(),
         'python': python_ml_status(),
-        'scrape_deps': probe_scrape_deps()['ok'],
+        'scrape_deps': scrape_deps['ok'],
+        # WHICH modules are absent, same convention as joycaption/video/siglip2
+        # above. The install banner used to recite a hand-written list of three
+        # package names; the probe watches seven, so a machine flagged because
+        # `ddgs` or `yt_dlp` is missing read a warning that named neither and
+        # could not explain why it was being asked to reinstall. The banner now
+        # quotes this string's list instead of keeping its own copy.
+        'scrape_deps_detail': scrape_deps['detail'],
         'training_visible': aitoolkit['ok'] or bool(cfg.secret('VAST_API_KEY')),
         'studio_visible': comfy['ok'],
     }
